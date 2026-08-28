@@ -50,10 +50,12 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     const item = new vscode.TreeItem(node.label);
     if (node.kind === 'folder') {
       item.resourceUri = node.uri;
+      item.iconPath = vscode.ThemeIcon.Folder;
       item.collapsibleState = vscode.TreeItemCollapsibleState.Collapsed;
       item.contextValue = 'folder';
     } else if (node.kind === 'file') {
       item.resourceUri = node.uri;
+      item.iconPath = vscode.ThemeIcon.File;
       const ext = path.extname(node.uri.fsPath).toLowerCase();
       const parseable = PERL_EXTS.has(ext) || JS_EXTS.has(ext);
       item.collapsibleState = parseable
