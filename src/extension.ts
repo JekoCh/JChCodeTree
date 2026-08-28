@@ -19,8 +19,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('jchCodeTree.refresh', () => provider.refresh())
   );
 
+  // Files only open on a second click within this window; a single click just
+  // toggles the tree's expand/collapse (VS Code's default row-click behavior).
+  // Functions have no children to expand, so they open on every click.
+  const DOUBLE_CLICK_MS = 400;
+  const lastFileClickAt = new Map<string, number>();
+
   context.subscriptions.push(
     vscode.commands.registerCommand('jchCodeTree.openItem', async (node: TreeNode) => {
+      if (node.kind === 'file') {
+        const key = node.uri.fsPath;
+        const now = Date.now();
+        const prev = lastFileClickAt.get(key);
+        if (prev !== undefined && now - prev <= DOUBLE_CLICK_MS) {
+          lastFileClickAt.delete(key);
+        } else {
+          lastFileClickAt.set(key, now);
+          return;
+        }
+      }
       const doc = await vscode.workspace.openTextDocument(node.uri);
       const editor = await vscode.window.showTextDocument(doc, { preview: false });
       const line = node.kind === 'function' ? node.line ?? 0 : 0;
