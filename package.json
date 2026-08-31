@@ -2,7 +2,7 @@
   "name": "jch-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css) with Perl/JS functions nested underneath, synced with the cursor.",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "jchakarov",
   "private": true,
   "engines": {
