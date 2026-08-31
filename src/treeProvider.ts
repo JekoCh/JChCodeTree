@@ -5,15 +5,7 @@ import { parsePerlFunctions, parseJsFunctions, FunctionInfo } from './parsers';
 const PERL_EXTS = new Set(['.pl', '.pm', '.cgi']);
 const JS_EXTS = new Set(['.js']);
 
-export type NodeKind = 'folder' | 'file' | 'function';
-
-export interface SerializedNode {
-  id: string;
-  label: string;
-  kind: NodeKind;
-  line?: number;
-  hasChildren: boolean;
-}
+type NodeKind = 'folder' | 'file' | 'function';
 
 export class TreeNode {
   functionsLoaded = false;
@@ -46,8 +38,6 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private roots: TreeNode[] = [];
   /** fsPath -> file TreeNode, rebuilt on every refresh() for cursor-sync lookups */
   private fileIndex = new Map<string, TreeNode>();
-  /** stable id (uri-based) -> node, used by the webview UI which can't hold object references */
-  private allNodes = new Map<string, TreeNode>();
 
   constructor(private extensions: string[]) {}
 
@@ -126,53 +116,6 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     return this.fileIndex.get(fsPath);
   }
 
-  private isParseable(uri: vscode.Uri): boolean {
-    const ext = path.extname(uri.fsPath).toLowerCase();
-    return PERL_EXTS.has(ext) || JS_EXTS.has(ext);
-  }
-
-  /** Stable id derived from the node's uri (+ line for functions), so it survives a tree rebuild. */
-  idFor(node: TreeNode): string {
-    const id =
-      node.kind === 'function' ? `${node.uri.toString()}::fn::${node.line}` : node.uri.toString();
-    this.allNodes.set(id, node);
-    return id;
-  }
-
-  resolveNode(id: string): TreeNode | undefined {
-    return this.allNodes.get(id);
-  }
-
-  /** Serialized children for the webview UI, which can only exchange plain JSON with the extension host. */
-  async getSerializedChildren(id?: string): Promise<SerializedNode[]> {
-    let node: TreeNode | undefined;
-    if (id !== undefined) {
-      node = this.allNodes.get(id);
-      if (!node) return []; // stale id (e.g. from before a full rebuild) - nothing to expand
-    }
-    const children = await this.getChildren(node);
-    return children.map(c => ({
-      id: this.idFor(c),
-      label: c.label,
-      kind: c.kind,
-      line: c.line,
-      hasChildren: c.kind === 'folder' || (c.kind === 'file' && this.isParseable(c.uri)),
-    }));
-  }
-
-  /** Root-to-node id chain, so the webview can expand ancestors before revealing a node. */
-  getAncestorChainIds(id: string): string[] {
-    const node = this.allNodes.get(id);
-    if (!node) return [];
-    const chain: string[] = [];
-    let current: TreeNode | undefined = node;
-    while (current) {
-      chain.unshift(this.idFor(current));
-      current = current.parent;
-    }
-    return chain;
-  }
-
   /** Returns the function node whose body covers the given 0-based line, or the file node if none matches. */
   async findFunctionAtLine(fsPath: string, line: number): Promise<TreeNode | undefined> {
     const fileNode = this.fileIndex.get(fsPath);
@@ -188,14 +131,8 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     return best ?? fileNode;
   }
 
-  async findFunctionIdAtLine(fsPath: string, line: number): Promise<string | undefined> {
-    const node = await this.findFunctionAtLine(fsPath, line);
-    return node ? this.idFor(node) : undefined;
-  }
-
   private async build(): Promise<void> {
     this.fileIndex.clear();
-    this.allNodes.clear();
     const folders = vscode.workspace.workspaceFolders ?? [];
     const globExts = this.extensions.map(e => e.replace(/^\./, '')).join(',');
     const roots: TreeNode[] = [];
