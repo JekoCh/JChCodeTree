@@ -6,9 +6,9 @@ import { CodeTreeWebview } from './webviewPanel';
 // TODO: make this a user setting; hardcoded for the first version.
 const EXTENSIONS = ['.pl', '.pm', '.cgi', '.html', '.js', '.css'];
 
-async function openNodeInEditor(node: TreeNode): Promise<void> {
+async function openNodeInEditor(node: TreeNode, viewColumn?: vscode.ViewColumn): Promise<void> {
   const doc = await vscode.workspace.openTextDocument(node.uri);
-  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  const editor = await vscode.window.showTextDocument(doc, { preview: false, viewColumn });
   const line = node.kind === 'function' ? node.line ?? 0 : 0;
   const pos = new vscode.Position(line, 0);
   editor.selection = new vscode.Selection(pos, pos);
@@ -25,7 +25,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   context.subscriptions.push(treeView);
 
-  const webview = new CodeTreeWebview(context, provider, openNodeInEditor);
+  // Once the webview tab is dragged into its own OS window, "the active editor
+  // column" resolves to wherever the user last clicked - which can be that
+  // same detached window. Pin webview-triggered opens to column one so files
+  // always land back in the main project window instead.
+  const webview = new CodeTreeWebview(context, provider, node =>
+    openNodeInEditor(node, vscode.ViewColumn.One)
+  );
 
   context.subscriptions.push(
     vscode.commands.registerCommand('jchCodeTree.refresh', () => provider.refresh())
