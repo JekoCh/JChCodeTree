@@ -1,9 +1,19 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { CodeTreeProvider, TreeNode } from './treeProvider';
+import { CodeTreeWebview } from './webviewPanel';
 
 // TODO: make this a user setting; hardcoded for the first version.
 const EXTENSIONS = ['.pl', '.pm', '.cgi', '.html', '.js', '.css'];
+
+async function openNodeInEditor(node: TreeNode): Promise<void> {
+  const doc = await vscode.workspace.openTextDocument(node.uri);
+  const editor = await vscode.window.showTextDocument(doc, { preview: false });
+  const line = node.kind === 'function' ? node.line ?? 0 : 0;
+  const pos = new vscode.Position(line, 0);
+  editor.selection = new vscode.Selection(pos, pos);
+  editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+}
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const provider = new CodeTreeProvider(EXTENSIONS);
@@ -15,13 +25,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   context.subscriptions.push(treeView);
 
+  const webview = new CodeTreeWebview(context, provider, openNodeInEditor);
+
   context.subscriptions.push(
     vscode.commands.registerCommand('jchCodeTree.refresh', () => provider.refresh())
   );
 
-  // Files only open on a second click within this window; a single click just
-  // toggles the tree's expand/collapse (VS Code's default row-click behavior).
-  // Functions have no children to expand, so they open on every click.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jchCodeTree.openInEditor', () => webview.reveal())
+  );
+
+  // In the sidebar tree, files only open on a second click within this window;
+  // a single click just toggles expand/collapse (VS Code's default row-click
+  // behavior). Functions have no children to expand, so they open on every
+  // click. The webview editor tab handles this itself via real dblclick events,
+  // so it calls openNodeInEditor directly instead of going through this command.
   const DOUBLE_CLICK_MS = 400;
   const lastFileClickAt = new Map<string, number>();
 
@@ -38,12 +56,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           return;
         }
       }
-      const doc = await vscode.workspace.openTextDocument(node.uri);
-      const editor = await vscode.window.showTextDocument(doc, { preview: false });
-      const line = node.kind === 'function' ? node.line ?? 0 : 0;
-      const pos = new vscode.Position(line, 0);
-      editor.selection = new vscode.Selection(pos, pos);
-      editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+      await openNodeInEditor(node);
     })
   );
 
@@ -67,7 +80,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // Highlight the enclosing function in the tree as the cursor moves.
+  // Relay the same tree-data-changed signal (per-file invalidation, or a full
+  // rebuild) to the webview editor tab, if it's open.
+  context.subscriptions.push(
+    provider.onDidChangeTreeData(node => {
+      if (!webview.isOpen) return;
+      if (node) webview.notifyInvalidated(node);
+      else webview.notifyReload();
+    })
+  );
+
+  // Highlight the enclosing function in both the sidebar tree and the webview
+  // (if open) as the cursor moves.
   let selectionTimer: ReturnType<typeof setTimeout> | undefined;
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection(e => {
@@ -79,11 +103,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       selectionTimer = setTimeout(async () => {
         const line = e.selections[0].active.line;
         const node = await provider.findFunctionAtLine(uri.fsPath, line);
-        if (!node) return;
-        try {
-          await treeView.reveal(node, { select: true, focus: false, expand: false });
-        } catch {
-          // tree not visible or node no longer present - not worth surfacing
+        if (node) {
+          try {
+            await treeView.reveal(node, { select: true, focus: false, expand: false });
+          } catch {
+            // tree not visible or node no longer present - not worth surfacing
+          }
+        }
+        if (webview.isOpen) {
+          const id = await provider.findFunctionIdAtLine(uri.fsPath, line);
+          webview.highlight(id);
         }
       }, 150);
     })

@@ -2,7 +2,7 @@
   "name": "jch-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css) with Perl/JS functions nested underneath, synced with the cursor.",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "publisher": "jchakarov",
   "private": true,
   "engines": {
@@ -15,7 +15,7 @@
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
-      "panel": [
+      "activitybar": [
         {
           "id": "jchCodeTreeContainer",
           "title": "Code Tree",
@@ -36,12 +36,22 @@
         "command": "jchCodeTree.refresh",
         "title": "Code Tree: Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "jchCodeTree.openInEditor",
+        "title": "Code Tree: Open in Editor Tab",
+        "icon": "$(multiple-windows)"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "jchCodeTree.refresh",
+          "when": "view == jchCodeTree",
+          "group": "navigation"
+        },
+        {
+          "command": "jchCodeTree.openInEditor",
           "when": "view == jchCodeTree",
           "group": "navigation"
         }

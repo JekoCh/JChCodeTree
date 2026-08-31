@@ -1,0 +1,77 @@
+body {
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-foreground);
+  background-color: var(--vscode-editor-background);
+  margin: 0;
+  padding: 4px 0;
+  user-select: none;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 0;
+}
+
+ul ul {
+  padding-left: 16px;
+}
+
+li > ul {
+  display: none;
+}
+
+li.expanded > ul {
+  display: block;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  border-radius: 3px;
+}
+
+.row:hover {
+  background-color: var(--vscode-list-hoverBackground);
+}
+
+.row.active {
+  background-color: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+
+.twisty {
+  width: 14px;
+  flex-shrink: 0;
+  display: inline-block;
+  text-align: center;
+  transition: transform 0.1s ease;
+}
+
+li.expanded > .row > .twisty {
+  transform: rotate(90deg);
+}
+
+.twisty.empty {
+  visibility: hidden;
+}
+
+.icon {
+  flex-shrink: 0;
+}
+
+.icon.function {
+  font-style: italic;
+  font-weight: bold;
+  color: var(--vscode-symbolIcon-methodForeground, #b180d7);
+}
+
+.label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
