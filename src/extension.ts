@@ -109,11 +109,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       selectionTimer = setTimeout(async () => {
         const line = e.selections[0].active.line;
         const node = await provider.findFunctionAtLine(uri.fsPath, line);
-        if (node) {
+        // reveal() forces the view visible even when the user closed/hid it,
+        // so only call it while the tree is already showing.
+        if (node && treeView.visible) {
           try {
             await treeView.reveal(node, { select: true, focus: false, expand: false });
           } catch {
-            // tree not visible or node no longer present - not worth surfacing
+            // node no longer present - not worth surfacing
           }
         }
         if (webview.isOpen) {

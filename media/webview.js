@@ -4,10 +4,10 @@
   const pendingClicks = new Map();
   const DOUBLE_CLICK_GUARD_MS = 220;
 
-  function iconFor(kind) {
-    if (kind === 'folder') return '\uD83D\uDCC1'; // folder
-    if (kind === 'file') return '\uD83D\uDCC4'; // page
-    return 'f'; // function
+  function iconClassFor(kind) {
+    if (kind === 'folder') return 'codicon-folder';
+    if (kind === 'file') return 'codicon-file';
+    return 'codicon-symbol-method';
   }
 
   function cssEscape(id) {
@@ -35,8 +35,7 @@
     row.appendChild(twisty);
 
     const icon = document.createElement('span');
-    icon.className = 'icon ' + node.kind;
-    icon.textContent = iconFor(node.kind);
+    icon.className = 'codicon ' + iconClassFor(node.kind) + ' icon ' + node.kind;
     row.appendChild(icon);
 
     const label = document.createElement('span');

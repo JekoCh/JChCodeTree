@@ -83,6 +83,9 @@ export class CodeTreeWebview {
     const cssUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'webview.css')
     );
+    const codiconCssUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, 'media', 'codicon', 'codicon.css')
+    );
     const jsUri = webview.asWebviewUri(
       vscode.Uri.joinPath(this.context.extensionUri, 'media', 'webview.js')
     );
@@ -91,7 +94,8 @@ export class CodeTreeWebview {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; script-src 'nonce-${nonce}';">
+<link rel="stylesheet" href="${codiconCssUri}">
 <link rel="stylesheet" href="${cssUri}">
 </head>
 <body>

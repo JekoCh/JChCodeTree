@@ -63,11 +63,14 @@ li.expanded > .row > .twisty {
 
 .icon {
   flex-shrink: 0;
+  font-size: 16px;
+}
+
+.icon.folder {
+  color: var(--vscode-icon-foreground, currentColor);
 }
 
 .icon.function {
-  font-style: italic;
-  font-weight: bold;
   color: var(--vscode-symbolIcon-methodForeground, #b180d7);
 }
 
