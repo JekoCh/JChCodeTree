@@ -51,7 +51,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "npm run compile && vsce package"
+    "package": "bash scripts/package.sh"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

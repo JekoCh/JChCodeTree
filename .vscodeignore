@@ -1,5 +1,7 @@
 .vscode/**
 src/**
+scripts/**
+version/**
 .gitignore
 tsconfig.json
 **/*.map
