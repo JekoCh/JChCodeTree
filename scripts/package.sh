@@ -9,5 +9,6 @@ for f in version/*.vsix; do
 done
 shopt -u nullglob
 
+rm -rf out
 npm run compile
 npx vsce package -o version/
