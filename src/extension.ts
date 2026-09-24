@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { CodeTreeProvider, TreeNode } from './treeProvider';
+import { CodeTreeProvider, TreeNode, FILE_REF_RE } from './treeProvider';
+import { FunctionDefinitionProvider, buildDefinitionSelector } from './definitionProvider';
 
 // TODO: make this a user setting; hardcoded for the first version.
-const EXTENSIONS = ['.pl', '.pm', '.cgi', '.html', '.js', '.css'];
+// Extensionless shell scripts (detected via shebang) are handled separately in treeProvider.ts.
+const EXTENSIONS = ['.pl', '.pm', '.cgi', '.html', '.js', '.css', '.ts', '.tsx', '.sh', '.json'];
 
 async function openNodeInEditor(node: TreeNode): Promise<void> {
   const doc = await vscode.workspace.openTextDocument(node.uri);
@@ -12,6 +14,13 @@ async function openNodeInEditor(node: TreeNode): Promise<void> {
   const pos = new vscode.Position(line, 0);
   editor.selection = new vscode.Selection(pos, pos);
   editor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenterIfOutsideViewport);
+}
+
+async function openLocation(location: vscode.Location): Promise<void> {
+  await vscode.window.showTextDocument(location.uri, {
+    preview: false,
+    selection: new vscode.Range(location.range.start, location.range.start),
+  });
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -26,6 +35,41 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.commands.registerCommand('jchCodeTree.refresh', () => provider.refresh())
+  );
+
+  context.subscriptions.push(
+    vscode.languages.registerDefinitionProvider(buildDefinitionSelector(), new FunctionDefinitionProvider(provider))
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('jchCodeTree.openSelectedFile', async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) return;
+
+      const range = editor.document.getWordRangeAtPosition(editor.selection.active, FILE_REF_RE);
+      if (!range) {
+        vscode.window.setStatusBarMessage('Code Tree: no file reference under the cursor', 2000);
+        return;
+      }
+
+      const text = editor.document.getText(range);
+      const locations = await provider.resolveFileReference(text, editor.document.uri);
+      if (locations.length === 0) {
+        vscode.window.setStatusBarMessage(`Code Tree: no file found for "${text}"`, 2000);
+        return;
+      }
+
+      if (locations.length === 1) {
+        await openLocation(locations[0]);
+        return;
+      }
+
+      const picked = await vscode.window.showQuickPick(
+        locations.map(loc => ({ label: vscode.workspace.asRelativePath(loc.uri), location: loc })),
+        { placeHolder: `Multiple matches for "${text}"` }
+      );
+      if (picked) await openLocation(picked.location);
+    })
   );
 
   // Files only open on a second click within this window; a single click just
@@ -58,11 +102,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     rebuildTimer = setTimeout(() => provider.refresh(), 300);
   };
 
-  const globExts = EXTENSIONS.map(e => e.slice(1)).join(',');
-  const watcher = vscode.workspace.createFileSystemWatcher(`**/*.{${globExts}}`);
+  // Watches everything (not just known extensions) so extensionless shell scripts
+  // appearing/disappearing also trigger a rebuild; scheduleRebuild is debounced.
+  const watcher = vscode.workspace.createFileSystemWatcher('**/*');
   watcher.onDidCreate(scheduleRebuild);
   watcher.onDidDelete(scheduleRebuild);
   context.subscriptions.push(watcher);
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration('JChCodeTree.showHiddenFiles')) provider.refresh();
+    })
+  );
 
   // Re-parse a file's function list once its edits are saved.
   context.subscriptions.push(

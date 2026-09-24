@@ -1,8 +1,8 @@
 {
   "name": "jch-code-tree",
   "displayName": "Code File & Function Tree",
-  "description": "Tree view of workspace files (pl/pm/cgi/html/js/css) with Perl/JS functions nested underneath, synced with the cursor.",
-  "version": "0.0.8",
+  "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
+  "version": "0.0.14",
   "publisher": "jchakarov",
   "private": true,
   "engines": {
@@ -10,7 +10,7 @@
   },
   "categories": ["Other"],
   "activationEvents": [
-    "onView:jchCodeTree"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -36,6 +36,10 @@
         "command": "jchCodeTree.refresh",
         "title": "Code Tree: Refresh",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "jchCodeTree.openSelectedFile",
+        "title": "Code Tree: Open Selected File"
       }
     ],
     "menus": {
@@ -46,7 +50,24 @@
           "group": "navigation"
         }
       ]
-    }
+    },
+    "configuration": {
+      "title": "Code Tree",
+      "properties": {
+        "JChCodeTree.showHiddenFiles": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show files and folders whose name starts with a dot."
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "jchCodeTree.openSelectedFile",
+        "key": "alt+o",
+        "when": "editorTextFocus"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
