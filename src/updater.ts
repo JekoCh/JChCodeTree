@@ -1,16 +1,27 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import * as os from 'os';
-import { execFile } from 'child_process';
+import * as https from 'https';
 
-// Best-effort `git pull` when the folder is inside a git clone; failures (not a repo,
-// offline, auth needed) are ignored and whatever .vsix is already there gets used.
-function gitPull(folder: string): Promise<void> {
-  return new Promise(resolve => {
-    execFile('git', ['-C', folder, 'pull', '--ff-only', '-q'],
-      { timeout: 30000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
-      () => resolve());
+// Public repo; package.json and version/<name>-x.y.z.vsix are committed together by
+// `npm run package` + push. HEAD = the default branch.
+const RAW_BASE = 'https://raw.githubusercontent.com/JekoCh/JChCodeTree/HEAD/';
+
+function download(url: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, res => {
+      if (res.statusCode !== 200) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    });
+    req.setTimeout(30000, () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
   });
 }
 
@@ -28,41 +39,37 @@ function isNewer(a: string, b: string): boolean {
   return false;
 }
 
-// Pulls and looks in JChCodeTree.updateFolder for a <name>-x.y.z.vsix newer than the running
-// version, installs it and offers a window reload. Empty setting = disabled.
+// Compares the running version with package.json on GitHub; if GitHub is newer, downloads
+// its .vsix, installs it and offers a window reload. Network errors are silent - next start retries.
 export async function checkForUpdate(context: vscode.ExtensionContext): Promise<void> {
-  const folder = vscode.workspace.getConfiguration('JChCodeTree').get<string>('updateFolder', '').trim()
-    .replace(/^~(?=\/|$)/, os.homedir());
-  if (!folder) return;
-
-  await gitPull(folder);
+  if (!vscode.workspace.getConfiguration('JChCodeTree').get<boolean>('autoUpdate', true)) return;
 
   const { name, version: current } = context.extension.packageJSON as { name: string; version: string };
-  const re = new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(\\d+\\.\\d+\\.\\d+)\\.vsix$`, 'i');
 
-  let entries: string[];
+  let latest: string;
+  let data: Buffer;
   try {
-    entries = await fs.readdir(folder);
+    latest = JSON.parse((await download(RAW_BASE + 'package.json')).toString('utf8')).version;
+    if (!isNewer(latest, current)) return;
+    data = await download(`${RAW_BASE}version/${name}-${latest}.vsix`);
   } catch {
-    return; // folder not reachable (e.g. network share offline) - try again next start
-  }
-
-  let best: { version: string; file: string } | undefined;
-  for (const entry of entries) {
-    const m = re.exec(entry);
-    if (m && isNewer(m[1], best?.version ?? current)) best = { version: m[1], file: entry };
-  }
-  if (!best) return;
-
-  try {
-    await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(path.join(folder, best.file)));
-  } catch (err) {
-    vscode.window.showWarningMessage(`Code Tree: update to ${best.version} failed: ${err}`);
     return;
   }
 
+  const file = path.join(context.globalStorageUri.fsPath, `${name}-${latest}.vsix`);
+  try {
+    await fs.mkdir(context.globalStorageUri.fsPath, { recursive: true });
+    await fs.writeFile(file, data);
+    await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(file));
+  } catch (err) {
+    vscode.window.showWarningMessage(`Code Tree: update to ${latest} failed: ${err}`);
+    return;
+  } finally {
+    await fs.rm(file, { force: true });
+  }
+
   const choice = await vscode.window.showInformationMessage(
-    `Code Tree updated to ${best.version}. Reload the window to use it.`,
+    `Code Tree updated to ${latest}. Reload the window to use it.`,
     'Reload'
   );
   if (choice === 'Reload') await vscode.commands.executeCommand('workbench.action.reloadWindow');

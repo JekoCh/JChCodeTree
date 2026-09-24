@@ -2,7 +2,7 @@
   "name": "JCh-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
-  "version": "0.0.21",
+  "version": "0.0.22",
   "publisher": "jchakarov",
   "private": true,
   "engines": {
@@ -64,11 +64,11 @@
           "default": false,
           "description": "Show files and folders reached through a symlink (under the link's path). Walks folders directly, independent of search.followSymlinks."
         },
-        "JChCodeTree.updateFolder": {
-          "type": "string",
-          "default": "",
+        "JChCodeTree.autoUpdate": {
+          "type": "boolean",
+          "default": true,
           "scope": "machine",
-          "description": "Folder with JCh-code-tree-x.y.z.vsix builds. On startup it is git-pulled (if inside a git clone) and a newer version found there is installed automatically. Empty = disabled."
+          "description": "On startup, install a newer version from github.com/JekoCh/JChCodeTree if one is published."
         }
       }
     },

@@ -32,19 +32,15 @@
 
 - `JChCodeTree.showHiddenFiles` (по подразбиране `false`) — дали да се показват файлове и папки, чието име започва с `.` (включително папки от multi-root workspace, напр. `.claude`). При промяна дървото се обновява автоматично.
 - `JChCodeTree.showSymlinks` (по подразбиране `false`) — дали да се показват файлове и папки, достъпни през symlink (под името на линка). Когато е включена, папките се обхождат директно, независимо от `search.followSymlinks`; защитено е от зацикляне, а `node_modules`/`.git`/`.svn`/`.hg`/`CVS` се пропускат. Тогава е нормално Go to Definition и `Alt+O` да дават дублирани резултати.
-- `JChCodeTree.updateFolder` (по подразбиране празно = изключено) — папка с `JCh-code-tree-x.y.z.vsix` файлове (напр. `version/` от `npm run package` или мрежова папка). При всяко отваряне на прозорец, ако там има по-нова версия от текущата, тя се инсталира автоматично и се предлага Reload. Задава се само в User settings (не в workspace). Ако папката е в git clone, преди проверката се прави `git pull --ff-only` (грешките се игнорират).
+- `JChCodeTree.autoUpdate` (по подразбиране `true`) — автоматично обновяване от GitHub (виж по-долу).
 
-## Обновяване през git
+## Инсталиране и обновяване
 
-`npm run package` оставя само последния `.vsix` във `version/` (по-старите отиват във `version/old/`, който не се commit-ва). Новата версия се публикува с commit + push на `version/`.
+Еднократно: изтегли последния `.vsix` от [version/](https://github.com/JekoCh/JChCodeTree/tree/master/version) и го инсталирай с **Extensions → … → Install from VSIX…**.
 
-За да се обновява автоматично на дадена машина — еднократно:
+След това при всяко отваряне на прозорец разширението сравнява версията си с `package.json` в [github.com/JekoCh/JChCodeTree](https://github.com/JekoCh/JChCodeTree). Ако там има по-нова, тегли `version/JCh-code-tree-x.y.z.vsix`, инсталира го и предлага Reload. Без интернет просто не се обновява до следващото стартиране.
 
-```sh
-git clone git@github.com:<user>/<repo>.git ~/.jch-code-tree
-```
-
-и в User `settings.json`: `"JChCodeTree.updateFolder": "~/.jch-code-tree/version"`. Clone-ът трябва да е отделен от работното копие, в което се разработва.
+Публикуване на нова версия: `npm run package` (оставя само последния `.vsix` във `version/`; по-старите отиват във `version/old/`, който не се commit-ва), после commit + push.
 
 ## Разпознаване на функции
 
@@ -64,6 +60,9 @@ git clone git@github.com:<user>/<repo>.git ~/.jch-code-tree
 - Файл без разширение се показва само ако първият му ред е shebang, сочещ към shell (`sh`/`bash`/`zsh`/`ksh`/`dash`).
 
 ## Changelog
+
+### 0.0.22
+- Автоматичното обновяване тегли директно от GitHub (`JekoCh/JChCodeTree`) — без clone и без настройки. `JChCodeTree.updateFolder` е заменена с `JChCodeTree.autoUpdate` (по подразбиране `true`).
 
 ### 0.0.21
 - `JChCodeTree.updateFolder` вече прави `git pull` на папката, ако тя е в git clone — новите версии се публикуват с push на `version/` в GitHub.
