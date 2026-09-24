@@ -2,8 +2,9 @@
   "name": "JCh-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
-  "version": "0.0.22",
+  "version": "0.0.23",
   "publisher": "jchakarov",
+  "icon": "media/icon.png",
   "private": true,
   "engines": {
     "vscode": "^1.85.0"
