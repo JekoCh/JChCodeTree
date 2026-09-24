@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { CodeTreeProvider, TreeNode, FILE_REF_RE } from './treeProvider';
 import { FunctionDefinitionProvider, buildDefinitionSelector } from './definitionProvider';
+import { checkForUpdate } from './updater';
 
 // TODO: make this a user setting; hardcoded for the first version.
 // Extensionless shell scripts (detected via shebang) are handled separately in treeProvider.ts.
@@ -24,17 +25,19 @@ async function openLocation(location: vscode.Location): Promise<void> {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  void checkForUpdate(context);
+
   const provider = new CodeTreeProvider(EXTENSIONS);
   await provider.refresh();
 
-  const treeView = vscode.window.createTreeView('jchCodeTree', {
+  const treeView = vscode.window.createTreeView('JChCodeTree', {
     treeDataProvider: provider,
     showCollapseAll: true,
   });
   context.subscriptions.push(treeView);
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('jchCodeTree.refresh', () => provider.refresh())
+    vscode.commands.registerCommand('JChCodeTree.refresh', () => provider.refresh())
   );
 
   context.subscriptions.push(
@@ -42,7 +45,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('jchCodeTree.openSelectedFile', async () => {
+    vscode.commands.registerCommand('JChCodeTree.openSelectedFile', async () => {
       const editor = vscode.window.activeTextEditor;
       if (!editor) return;
 
@@ -79,7 +82,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const lastFileClickAt = new Map<string, number>();
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('jchCodeTree.openItem', async (node: TreeNode) => {
+    vscode.commands.registerCommand('JChCodeTree.openItem', async (node: TreeNode) => {
       if (node.kind === 'file') {
         const key = node.uri.fsPath;
         const now = Date.now();
@@ -111,7 +114,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('JChCodeTree.showHiddenFiles')) provider.refresh();
+      if (e.affectsConfiguration('JChCodeTree.showHiddenFiles') || e.affectsConfiguration('JChCodeTree.showSymlinks')) {
+        provider.refresh();
+      }
     })
   );
 

@@ -1,8 +1,8 @@
 {
-  "name": "jch-code-tree",
+  "name": "JCh-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
-  "version": "0.0.14",
+  "version": "0.0.21",
   "publisher": "jchakarov",
   "private": true,
   "engines": {
@@ -17,36 +17,36 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "jchCodeTreeContainer",
+          "id": "JChCodeTreeContainer",
           "title": "Code Tree",
           "icon": "media/tree-icon.svg"
         }
       ]
     },
     "views": {
-      "jchCodeTreeContainer": [
+      "JChCodeTreeContainer": [
         {
-          "id": "jchCodeTree",
+          "id": "JChCodeTree",
           "name": "Code Tree"
         }
       ]
     },
     "commands": [
       {
-        "command": "jchCodeTree.refresh",
+        "command": "JChCodeTree.refresh",
         "title": "Code Tree: Refresh",
         "icon": "$(refresh)"
       },
       {
-        "command": "jchCodeTree.openSelectedFile",
+        "command": "JChCodeTree.openSelectedFile",
         "title": "Code Tree: Open Selected File"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "jchCodeTree.refresh",
-          "when": "view == jchCodeTree",
+          "command": "JChCodeTree.refresh",
+          "when": "view == JChCodeTree",
           "group": "navigation"
         }
       ]
@@ -58,12 +58,23 @@
           "type": "boolean",
           "default": false,
           "description": "Show files and folders whose name starts with a dot."
+        },
+        "JChCodeTree.showSymlinks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show files and folders reached through a symlink (under the link's path). Walks folders directly, independent of search.followSymlinks."
+        },
+        "JChCodeTree.updateFolder": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Folder with JCh-code-tree-x.y.z.vsix builds. On startup it is git-pulled (if inside a git clone) and a newer version found there is installed automatically. Empty = disabled."
         }
       }
     },
     "keybindings": [
       {
-        "command": "jchCodeTree.openSelectedFile",
+        "command": "JChCodeTree.openSelectedFile",
         "key": "alt+o",
         "when": "editorTextFocus"
       }

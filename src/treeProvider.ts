@@ -9,6 +9,7 @@ export const SH_EXTS = new Set(['.sh']);
 export const SHEBANG_SHELL_RE = /^#!.*\b(?:bash|zsh|ksh|dash|sh)\b/;
 /** A path-like token: something/like/this.ext — used to spot file references for "open this file". */
 export const FILE_REF_RE = /[\w./-]+\.\w+/;
+const WALK_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'CVS']);
 
 type NodeKind = 'folder' | 'file' | 'function';
 export type Lang = 'perl' | 'js' | 'sh';
@@ -81,11 +82,11 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         ? vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None;
       item.contextValue = 'file';
-      item.command = { command: 'jchCodeTree.openItem', title: 'Open', arguments: [node] };
+      item.command = { command: 'JChCodeTree.openItem', title: 'Open', arguments: [node] };
     } else {
       item.iconPath = new vscode.ThemeIcon('symbol-method');
       item.contextValue = 'function';
-      item.command = { command: 'jchCodeTree.openItem', title: 'Open', arguments: [node] };
+      item.command = { command: 'JChCodeTree.openItem', title: 'Open', arguments: [node] };
     }
     return item;
   }
@@ -122,8 +123,8 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 
   /** Drops the cached function list for a file so the next expand re-parses it from disk. */
-  invalidateFile(uri: vscode.Uri): void {
-    const node = this.fileIndex.get(uri.fsPath);
+  async invalidateFile(uri: vscode.Uri): Promise<void> {
+    const node = await this.resolveFileNode(uri.fsPath);
     if (node) {
       node.functionsLoaded = false;
       node.children = undefined;
@@ -191,7 +192,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   /** Returns the function node whose body covers the given 0-based line, or the file node if none matches. */
   async findFunctionAtLine(fsPath: string, line: number): Promise<TreeNode | undefined> {
-    const fileNode = this.fileIndex.get(fsPath);
+    const fileNode = await this.resolveFileNode(fsPath);
     if (!fileNode) return undefined;
     if (!fileNode.functionsLoaded) await this.loadFunctions(fileNode);
     const children = fileNode.children ?? [];
@@ -202,6 +203,43 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       }
     }
     return best ?? fileNode;
+  }
+
+  /** Tree node for a path; a file opened through a hidden symlink maps to its real file's node. */
+  private async resolveFileNode(fsPath: string): Promise<TreeNode | undefined> {
+    const node = this.fileIndex.get(fsPath);
+    if (node) return node;
+    try {
+      return this.fileIndex.get(await fsp.realpath(fsPath));
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Lists files under `root`, following symlinks (independent of search.followSymlinks). */
+  private async walkFolder(root: vscode.Uri, showHidden: boolean): Promise<vscode.Uri[]> {
+    const files: vscode.Uri[] = [];
+    // Loop guard is per ancestor chain, so `linkdir -> real` still shows alongside `real`.
+    const visit = async (dir: vscode.Uri, ancestors: string[]): Promise<void> => {
+      let real: string;
+      let entries: [string, vscode.FileType][];
+      try {
+        real = await fsp.realpath(dir.fsPath);
+        if (ancestors.includes(real)) return;
+        entries = await vscode.workspace.fs.readDirectory(dir);
+      } catch {
+        return;
+      }
+      const chain = [...ancestors, real];
+      await Promise.all(entries.map(async ([name, type]) => {
+        if (WALK_SKIP_DIRS.has(name) || (!showHidden && name.startsWith('.'))) return;
+        const uri = vscode.Uri.joinPath(dir, name);
+        if (type & vscode.FileType.Directory) await visit(uri, chain);
+        else if (type & vscode.FileType.File) files.push(uri);
+      }));
+    };
+    await visit(root, []);
+    return files;
   }
 
   /** True when the file itself or any folder between it and the workspace root is a symlink (or broken). */
@@ -236,12 +274,16 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     this.fileIndex.clear();
     const folders = vscode.workspace.workspaceFolders ?? [];
     const roots: TreeNode[] = [];
-    const showHidden = vscode.workspace.getConfiguration('JChCodeTree').get<boolean>('showHiddenFiles', false);
+    const config = vscode.workspace.getConfiguration('JChCodeTree');
+    const showHidden = config.get<boolean>('showHiddenFiles', false);
+    const showSymlinks = config.get<boolean>('showSymlinks', false);
 
     for (const folder of folders) {
-      const pattern = new vscode.RelativePattern(folder, '**/*');
-      const uris = await vscode.workspace.findFiles(pattern, '**/{node_modules,.git}/**');
-      const realRoot = folder.uri.scheme === 'file'
+      if (!showHidden && path.basename(folder.uri.fsPath).startsWith('.')) continue;
+      const uris = showSymlinks
+        ? await this.walkFolder(folder.uri, showHidden)
+        : await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), '**/{node_modules,.git}/**');
+      const realRoot = !showSymlinks && folder.uri.scheme === 'file'
         ? await fsp.realpath(folder.uri.fsPath).catch(() => folder.uri.fsPath)
         : undefined;
       const classified = await Promise.all(
