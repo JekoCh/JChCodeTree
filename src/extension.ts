@@ -1,13 +1,10 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { CodeTreeProvider, TreeNode, FILE_REF_RE } from './treeProvider';
 import { FunctionDefinitionProvider, buildDefinitionSelector } from './definitionProvider';
-import { FunctionDocumentSymbolProvider, FunctionWorkspaceSymbolProvider, buildSymbolSelector } from './symbolProvider';
+import {
+  FunctionDocumentSymbolProvider, FunctionWorkspaceSymbolProvider, FunctionReferenceProvider, buildSymbolSelector,
+} from './symbolProvider';
 import { checkForUpdate } from './updater';
-
-// TODO: make this a user setting; hardcoded for the first version.
-// Extensionless shell scripts (detected via shebang) are handled separately in treeProvider.ts.
-const EXTENSIONS = ['.pl', '.pm', '.cgi', '.html', '.js', '.css', '.ts', '.tsx', '.sh', '.json'];
 
 async function openNodeInEditor(node: TreeNode): Promise<void> {
   const doc = await vscode.workspace.openTextDocument(node.uri);
@@ -28,7 +25,7 @@ async function openLocation(location: vscode.Location): Promise<void> {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   void checkForUpdate(context);
 
-  const provider = new CodeTreeProvider(EXTENSIONS);
+  const provider = new CodeTreeProvider();
   await provider.refresh();
 
   const treeView = vscode.window.createTreeView('JChCodeTree', {
@@ -41,9 +38,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.commands.registerCommand('JChCodeTree.refresh', () => provider.refresh())
   );
 
+  // The selectors come from JChCodeTree.extensions, so these are re-registered after every refresh.
+  let languageProviders: vscode.Disposable | undefined;
+  const registerLanguageProviders = () => {
+    languageProviders?.dispose();
+    languageProviders = vscode.Disposable.from(
+      vscode.languages.registerDefinitionProvider(buildDefinitionSelector(), new FunctionDefinitionProvider(provider)),
+      vscode.languages.registerDocumentSymbolProvider(buildSymbolSelector(), new FunctionDocumentSymbolProvider()),
+      vscode.languages.registerReferenceProvider(buildSymbolSelector(), new FunctionReferenceProvider(provider))
+    );
+  };
+  registerLanguageProviders();
   context.subscriptions.push(
-    vscode.languages.registerDefinitionProvider(buildDefinitionSelector(), new FunctionDefinitionProvider(provider)),
-    vscode.languages.registerDocumentSymbolProvider(buildSymbolSelector(), new FunctionDocumentSymbolProvider()),
+    { dispose: () => languageProviders?.dispose() },
     vscode.languages.registerWorkspaceSymbolProvider(new FunctionWorkspaceSymbolProvider(provider))
   );
 
@@ -135,8 +142,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('JChCodeTree.showHiddenFiles') || e.affectsConfiguration('JChCodeTree.showSymlinks')) {
-        provider.refresh();
+      const keys = ['JChCodeTree.showHiddenFiles', 'JChCodeTree.showSymlinks', 'JChCodeTree.extensions', 'JChCodeTree.exclude', 'files.exclude'];
+      if (keys.some(k => e.affectsConfiguration(k))) {
+        void provider.refresh().then(registerLanguageProviders);
       }
     })
   );

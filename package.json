@@ -2,7 +2,7 @@
   "name": "JCh-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
-  "version": "0.0.24",
+  "version": "0.0.25",
   "publisher": "jchakarov",
   "icon": "media/icon.png",
   "private": true,
@@ -99,6 +99,34 @@
     "configuration": {
       "title": "Code Tree",
       "properties": {
+        "JChCodeTree.extensions": {
+          "type": "object",
+          "default": {
+            ".pl": "perl", ".pm": "perl", ".cgi": "perl",
+            ".js": "js", ".ts": "js", ".tsx": "js",
+            ".sh": "sh",
+            ".html": "none", ".css": "none", ".json": "none"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["perl", "js", "sh", "none", "hide"],
+            "enumDescriptions": [
+              "Shown, with Perl subs underneath",
+              "Shown, with JS/TS functions underneath",
+              "Shown, with shell functions underneath",
+              "Shown, without functions",
+              "Not shown (use this to remove one of the defaults)"
+            ]
+          },
+          "markdownDescription": "File extensions shown in the tree, and which parser finds their functions. E.g. `\".t\": \"perl\"`, `\".tmpl\": \"none\"`, `\".json\": \"hide\"`. Extensionless shell scripts are detected by their shebang regardless."
+        },
+        "JChCodeTree.exclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "scope": "resource",
+          "markdownDescription": "Glob patterns, relative to the workspace folder, of files and folders to leave out of the tree (on top of `#files.exclude#`). E.g. `**/logs`, `tmp`, `**/*.min.js`."
+        },
         "JChCodeTree.showHiddenFiles": {
           "type": "boolean",
           "default": false,

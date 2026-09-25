@@ -3,9 +3,6 @@ import * as path from 'path';
 import { promises as fsp } from 'fs';
 import { parsePerlFunctions, parseJsFunctions, parseShFunctions, FunctionInfo } from './parsers';
 
-export const PERL_EXTS = new Set(['.pl', '.pm', '.cgi']);
-export const JS_EXTS = new Set(['.js', '.ts', '.tsx']);
-export const SH_EXTS = new Set(['.sh']);
 export const SHEBANG_SHELL_RE = /^#!.*\b(?:bash|zsh|ksh|dash|sh)\b/;
 /** A path-like token: something/like/this.ext — used to spot file references for "open this file". */
 export const FILE_REF_RE = /[\w./-]+\.\w+/;
@@ -14,11 +11,62 @@ const WALK_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'CVS']);
 type NodeKind = 'folder' | 'file' | 'function';
 export type Lang = 'perl' | 'js' | 'sh';
 
+/** Shown extension -> its parser ('none' = shown without functions). Reloaded from settings on every build(). */
+let extensionKinds = new Map<string, Lang | 'none'>();
+
+/** Reads JChCodeTree.extensions; VS Code merges the user's entries over the package.json defaults. */
+function loadExtensionSetting(): void {
+  const raw = vscode.workspace.getConfiguration('JChCodeTree').get<Record<string, string>>('extensions', {});
+  extensionKinds = new Map();
+  for (const [ext, kind] of Object.entries(raw)) {
+    if (kind === 'hide') continue;
+    const key = (ext.startsWith('.') ? ext : `.${ext}`).toLowerCase();
+    extensionKinds.set(key, kind === 'perl' || kind === 'js' || kind === 'sh' ? kind : 'none');
+  }
+}
+
+export function extensionsFor(lang: Lang): string[] {
+  return [...extensionKinds].filter(([, kind]) => kind === lang).map(([ext]) => ext);
+}
+
 export function langForExtension(ext: string): Lang | undefined {
-  if (PERL_EXTS.has(ext)) return 'perl';
-  if (JS_EXTS.has(ext)) return 'js';
-  if (SH_EXTS.has(ext)) return 'sh';
-  return undefined;
+  const kind = extensionKinds.get(ext);
+  return kind === 'none' ? undefined : kind;
+}
+
+/** Minimal VS Code-style glob -> RegExp (**, *, ?, {a,b}, [...]), for '/'-separated workspace-relative paths. */
+function globToRegExp(glob: string): RegExp {
+  glob = glob.replace(/^\/+|\/+$/g, '');
+  let re = '';
+  let inGroup = false;
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') {
+      // '**/' is zero or more folders; any other '**' is anything
+      if (glob[i + 2] === '/') { re += '(?:.*/)?'; i += 2; } else { re += '.*'; i++; }
+    } else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if (c === '{') { re += '(?:'; inGroup = true; }
+    else if (c === '}' && inGroup) { re += ')'; inGroup = false; }
+    else if (c === ',' && inGroup) re += '|';
+    else if (c === '[' && glob.indexOf(']', i) > i) {
+      const end = glob.indexOf(']', i);
+      re += `[${glob.slice(i + 1, end).replace(/^!/, '^').replace(/\\/g, '\\\\')}]`;
+      i = end;
+    } else re += c.replace(/[.+^$()|\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** True when the relative path, or any folder on the way to it, matches one of the patterns. */
+function isExcluded(rel: string, excludes: RegExp[]): boolean {
+  if (!excludes.length) return false;
+  const parts = rel.split(path.sep);
+  for (let i = 1; i <= parts.length; i++) {
+    const prefix = parts.slice(0, i).join('/');
+    if (excludes.some(re => re.test(prefix))) return true;
+  }
+  return false;
 }
 
 export function parseFunctions(lang: Lang, text: string): FunctionInfo[] {
@@ -59,13 +107,8 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private roots: TreeNode[] = [];
   /** fsPath -> file TreeNode, rebuilt on every refresh() for cursor-sync lookups */
   private fileIndex = new Map<string, TreeNode>();
-  private readonly extensionSet: Set<string>;
   /** name -> definition locations, lazily built across the whole project; dropped on any change. */
   private definitionIndex?: Map<string, { uri: vscode.Uri; line: number; lang: Lang }[]>;
-
-  constructor(private extensions: string[]) {
-    this.extensionSet = new Set(extensions.map(e => e.toLowerCase()));
-  }
 
   async refresh(): Promise<void> {
     await this.build();
@@ -115,18 +158,53 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     fileNode.functionsLoaded = true;
     let infos: FunctionInfo[] = [];
     try {
-      // An open editor may hold unsaved edits - parse what the user sees, not the disk copy.
-      const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fileNode.uri.fsPath);
-      const text = openDoc
-        ? openDoc.getText()
-        : Buffer.from(await vscode.workspace.fs.readFile(fileNode.uri)).toString('utf8');
-      infos = parseFunctions(fileNode.lang!, text);
+      infos = parseFunctions(fileNode.lang!, await this.readText(fileNode.uri));
     } catch {
       infos = [];
     }
     fileNode.children = infos.map(
       info => new TreeNode('function', info.name, fileNode.uri, fileNode, info.line)
     );
+  }
+
+  /** An open editor may hold unsaved edits - read what the user sees, not the disk copy. */
+  private async readText(uri: vscode.Uri): Promise<string> {
+    const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === uri.fsPath);
+    return openDoc
+      ? openDoc.getText()
+      : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+  }
+
+  /**
+   * Shift+F12: every whole-word occurrence of a known function's name in files of the same
+   * language - a text search, so comments/strings/hash keys with that name count too.
+   * `Foo::bar` is searched as `bar`, which also finds `Foo::bar(...)` and plain `bar(...)`.
+   */
+  async findReferences(name: string, lang: Lang): Promise<vscode.Location[]> {
+    const index = await this.ensureDefinitionIndex();
+    const short = name.slice(name.lastIndexOf(':') + 1);
+    const known = [name, short].some(n => index.get(n)?.some(e => e.lang === lang));
+    if (!known) return [];
+
+    const escaped = short.replace(/[$]/g, '\\$&');
+    const re = new RegExp(`(?<![\\w$@%])${escaped}(?![\\w$])`, 'g');
+    const files = [...this.fileIndex.values()].filter(n => n.lang === lang);
+    const perFile = await Promise.all(files.map(async fileNode => {
+      const found: vscode.Location[] = [];
+      let text: string;
+      try {
+        text = await this.readText(fileNode.uri);
+      } catch {
+        return found;
+      }
+      text.split(/\r?\n/).forEach((line, i) => {
+        for (const m of line.matchAll(re)) {
+          found.push(new vscode.Location(fileNode.uri, new vscode.Range(i, m.index!, i, m.index! + short.length)));
+        }
+      });
+      return found;
+    }));
+    return perFile.flat();
   }
 
   /** Drops the cached function list for a file so the next expand re-parses it. */
@@ -250,7 +328,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   }
 
   /** Lists files under `root`, following symlinks (independent of search.followSymlinks). */
-  private async walkFolder(root: vscode.Uri, showHidden: boolean): Promise<vscode.Uri[]> {
+  private async walkFolder(root: vscode.Uri, showHidden: boolean, excludes: RegExp[]): Promise<vscode.Uri[]> {
     const files: vscode.Uri[] = [];
     // Loop guard is per ancestor chain, so `linkdir -> real` still shows alongside `real`.
     const visit = async (dir: vscode.Uri, ancestors: string[]): Promise<void> => {
@@ -267,6 +345,8 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       await Promise.all(entries.map(async ([name, type]) => {
         if (WALK_SKIP_DIRS.has(name) || (!showHidden && name.startsWith('.'))) return;
         const uri = vscode.Uri.joinPath(dir, name);
+        // Checked per entry, so an excluded folder is never descended into.
+        if (isExcluded(path.relative(root.fsPath, uri.fsPath), excludes)) return;
         if (type & vscode.FileType.Directory) await visit(uri, chain);
         else if (type & vscode.FileType.File) files.push(uri);
       }));
@@ -290,7 +370,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     const ext = path.extname(uri.fsPath).toLowerCase();
     const known = langForExtension(ext);
     if (known) return known;
-    if (ext) return this.extensionSet.has(ext) ? 'plain' : 'skip';
+    if (ext) return extensionKinds.has(ext) ? 'plain' : 'skip';
 
     // Extensionless files only qualify when they look like a shell script.
     if (path.basename(uri.fsPath).startsWith('.')) return 'skip';
@@ -317,6 +397,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   private async build(): Promise<void> {
     this.fileIndex.clear();
+    loadExtensionSetting();
     const folders = vscode.workspace.workspaceFolders ?? [];
     const roots: TreeNode[] = [];
     const config = vscode.workspace.getConfiguration('JChCodeTree');
@@ -325,17 +406,24 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
     for (const folder of folders) {
       if (!showHidden && path.basename(folder.uri.fsPath).startsWith('.')) continue;
+      const filesExclude = vscode.workspace.getConfiguration('files', folder.uri).get<Record<string, unknown>>('exclude', {});
+      const excludes = [
+        ...Object.keys(filesExclude).filter(k => filesExclude[k] === true),
+        ...vscode.workspace.getConfiguration('JChCodeTree', folder.uri).get<string[]>('exclude', []),
+      ].map(globToRegExp);
       const uris = showSymlinks
-        ? await this.walkFolder(folder.uri, showHidden)
+        ? await this.walkFolder(folder.uri, showHidden, excludes)
         : await vscode.workspace.findFiles(new vscode.RelativePattern(folder, '**/*'), '**/{node_modules,.git}/**');
       const realRoot = !showSymlinks && folder.uri.scheme === 'file'
         ? await fsp.realpath(folder.uri.fsPath).catch(() => folder.uri.fsPath)
         : undefined;
       const classified = await Promise.all(
         uris.map(async uri => {
-          if (!showHidden && path.relative(folder.uri.fsPath, uri.fsPath).split(path.sep).some(p => p.startsWith('.'))) {
+          const rel = path.relative(folder.uri.fsPath, uri.fsPath);
+          if (!showHidden && rel.split(path.sep).some(p => p.startsWith('.'))) {
             return { uri, lang: 'skip' as const };
           }
+          if (isExcluded(rel, excludes)) return { uri, lang: 'skip' as const };
           if (realRoot && await this.isViaSymlink(uri, folder.uri.fsPath, realRoot)) {
             return { uri, lang: 'skip' as const };
           }

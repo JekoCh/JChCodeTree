@@ -1,10 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { CodeTreeProvider, Lang, PERL_EXTS, JS_EXTS, SH_EXTS, langForExtension, SHEBANG_SHELL_RE, FILE_REF_RE } from './treeProvider';
+import { CodeTreeProvider, Lang, extensionsFor, langForExtension, SHEBANG_SHELL_RE, FILE_REF_RE } from './treeProvider';
 
 // Mirrors PERL_SUB_RE's namespaced-sub capture (Foo::Bar::baz) and the JS patterns' $-prefixed names,
 // so the clicked word matches the full name parsers.ts indexed the definition under.
-const DEFINITION_WORD_RE = /[A-Za-z_$][\w$]*(?:::\w+)*/;
+export const DEFINITION_WORD_RE = /[A-Za-z_$][\w$]*(?:::\w+)*/;
 
 /** Same classification as treeProvider's classify(), but off an already-open document (no disk read). */
 export function langForDocument(doc: vscode.TextDocument): Lang | undefined {
@@ -17,7 +17,7 @@ export function langForDocument(doc: vscode.TextDocument): Lang | undefined {
 }
 
 export function buildDefinitionSelector(): vscode.DocumentSelector {
-  const exts = [...PERL_EXTS, ...JS_EXTS, ...SH_EXTS];
+  const exts = [...extensionsFor('perl'), ...extensionsFor('js'), ...extensionsFor('sh')];
   const filters: vscode.DocumentFilter[] = exts.map(ext => ({ scheme: 'file', pattern: `**/*${ext}` }));
   filters.push({ scheme: 'file', language: 'shellscript' });
   return filters;

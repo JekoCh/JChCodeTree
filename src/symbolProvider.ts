@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
-import { CodeTreeProvider, Lang, PERL_EXTS, SH_EXTS, parseFunctions } from './treeProvider';
-import { langForDocument } from './definitionProvider';
+import { CodeTreeProvider, Lang, extensionsFor, parseFunctions } from './treeProvider';
+import { DEFINITION_WORD_RE, langForDocument } from './definitionProvider';
 
-// JS/TS are left out: VS Code's built-in TypeScript support already provides their symbols,
-// and adding ours would show every function twice in Outline and Ctrl+T.
+// JS/TS are left out: VS Code's built-in TypeScript support already provides their symbols
+// and references, and adding ours would show every result twice.
 const SYMBOL_LANGS = new Set<Lang>(['perl', 'sh']);
 
 export function buildSymbolSelector(): vscode.DocumentSelector {
-  const filters: vscode.DocumentFilter[] = [...PERL_EXTS, ...SH_EXTS].map(ext => ({ scheme: 'file', pattern: `**/*${ext}` }));
+  const filters: vscode.DocumentFilter[] = [...extensionsFor('perl'), ...extensionsFor('sh')]
+    .map(ext => ({ scheme: 'file', pattern: `**/*${ext}` }));
   filters.push({ scheme: 'file', language: 'shellscript' });
   return filters;
 }
@@ -32,5 +33,17 @@ export class FunctionWorkspaceSymbolProvider implements vscode.WorkspaceSymbolPr
 
   provideWorkspaceSymbols(query: string): Promise<vscode.SymbolInformation[]> {
     return this.provider.searchSymbols(query, SYMBOL_LANGS);
+  }
+}
+
+export class FunctionReferenceProvider implements vscode.ReferenceProvider {
+  constructor(private readonly provider: CodeTreeProvider) {}
+
+  async provideReferences(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Location[]> {
+    const lang = langForDocument(document);
+    if (!lang || !SYMBOL_LANGS.has(lang)) return [];
+    const range = document.getWordRangeAtPosition(position, DEFINITION_WORD_RE);
+    if (!range) return [];
+    return this.provider.findReferences(document.getText(range), lang);
   }
 }
