@@ -2,7 +2,7 @@
   "name": "JCh-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
-  "version": "0.0.23",
+  "version": "0.0.24",
   "publisher": "jchakarov",
   "icon": "media/icon.png",
   "private": true,
@@ -41,6 +41,22 @@
       {
         "command": "JChCodeTree.openSelectedFile",
         "title": "Code Tree: Open Selected File"
+      },
+      {
+        "command": "JChCodeTree.copyName",
+        "title": "Copy Name"
+      },
+      {
+        "command": "JChCodeTree.copyRelativePath",
+        "title": "Copy Relative Path"
+      },
+      {
+        "command": "JChCodeTree.openToSide",
+        "title": "Open to the Side"
+      },
+      {
+        "command": "JChCodeTree.revealInExplorer",
+        "title": "Reveal in Explorer View"
       }
     ],
     "menus": {
@@ -50,6 +66,34 @@
           "when": "view == JChCodeTree",
           "group": "navigation"
         }
+      ],
+      "view/item/context": [
+        {
+          "command": "JChCodeTree.openToSide",
+          "when": "view == JChCodeTree && viewItem =~ /^(file|function)$/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "JChCodeTree.revealInExplorer",
+          "when": "view == JChCodeTree && viewItem =~ /^(file|folder)$/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "JChCodeTree.copyName",
+          "when": "view == JChCodeTree && viewItem == function",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "JChCodeTree.copyRelativePath",
+          "when": "view == JChCodeTree",
+          "group": "2_copy@2"
+        }
+      ],
+      "commandPalette": [
+        { "command": "JChCodeTree.copyName", "when": "false" },
+        { "command": "JChCodeTree.copyRelativePath", "when": "false" },
+        { "command": "JChCodeTree.openToSide", "when": "false" },
+        { "command": "JChCodeTree.revealInExplorer", "when": "false" }
       ]
     },
     "configuration": {

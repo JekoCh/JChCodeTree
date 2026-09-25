@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { CodeTreeProvider, TreeNode, FILE_REF_RE } from './treeProvider';
 import { FunctionDefinitionProvider, buildDefinitionSelector } from './definitionProvider';
+import { FunctionDocumentSymbolProvider, FunctionWorkspaceSymbolProvider, buildSymbolSelector } from './symbolProvider';
 import { checkForUpdate } from './updater';
 
 // TODO: make this a user setting; hardcoded for the first version.
@@ -41,7 +42,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
 
   context.subscriptions.push(
-    vscode.languages.registerDefinitionProvider(buildDefinitionSelector(), new FunctionDefinitionProvider(provider))
+    vscode.languages.registerDefinitionProvider(buildDefinitionSelector(), new FunctionDefinitionProvider(provider)),
+    vscode.languages.registerDocumentSymbolProvider(buildSymbolSelector(), new FunctionDocumentSymbolProvider()),
+    vscode.languages.registerWorkspaceSymbolProvider(new FunctionWorkspaceSymbolProvider(provider))
+  );
+
+  // Tree context menu.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('JChCodeTree.copyName', (node: TreeNode) =>
+      vscode.env.clipboard.writeText(node.label)),
+    vscode.commands.registerCommand('JChCodeTree.copyRelativePath', (node: TreeNode) =>
+      vscode.env.clipboard.writeText(vscode.workspace.asRelativePath(node.uri, false))),
+    vscode.commands.registerCommand('JChCodeTree.openToSide', async (node: TreeNode) => {
+      const pos = new vscode.Position(node.kind === 'function' ? node.line ?? 0 : 0, 0);
+      await vscode.window.showTextDocument(node.uri, {
+        preview: false,
+        viewColumn: vscode.ViewColumn.Beside,
+        selection: new vscode.Range(pos, pos),
+      });
+    }),
+    vscode.commands.registerCommand('JChCodeTree.revealInExplorer', (node: TreeNode) =>
+      vscode.commands.executeCommand('revealInExplorer', node.uri))
   );
 
   context.subscriptions.push(
@@ -120,9 +141,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // Re-parse a file's function list once its edits are saved.
+  // Re-parse a file's function list as it is edited (debounced per file), and when it is
+  // closed, since unsaved edits it was parsed from may have been discarded.
+  const editTimers = new Map<string, ReturnType<typeof setTimeout>>();
   context.subscriptions.push(
-    vscode.workspace.onDidSaveTextDocument(doc => {
+    vscode.workspace.onDidChangeTextDocument(e => {
+      const uri = e.document.uri;
+      if (uri.scheme !== 'file' || e.contentChanges.length === 0) return;
+      clearTimeout(editTimers.get(uri.fsPath));
+      editTimers.set(uri.fsPath, setTimeout(() => {
+        editTimers.delete(uri.fsPath);
+        provider.invalidateFile(uri);
+      }, 500));
+    }),
+    vscode.workspace.onDidCloseTextDocument(doc => {
       if (doc.uri.scheme === 'file') provider.invalidateFile(doc.uri);
     })
   );
@@ -133,7 +165,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.onDidChangeTextEditorSelection(e => {
       const uri = e.textEditor.document.uri;
       if (uri.scheme !== 'file') return;
-      if (!EXTENSIONS.includes(path.extname(uri.fsPath).toLowerCase())) return;
 
       if (selectionTimer) clearTimeout(selectionTimer);
       selectionTimer = setTimeout(async () => {

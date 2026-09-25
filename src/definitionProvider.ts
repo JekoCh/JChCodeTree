@@ -7,7 +7,7 @@ import { CodeTreeProvider, Lang, PERL_EXTS, JS_EXTS, SH_EXTS, langForExtension, 
 const DEFINITION_WORD_RE = /[A-Za-z_$][\w$]*(?:::\w+)*/;
 
 /** Same classification as treeProvider's classify(), but off an already-open document (no disk read). */
-function langForDocument(doc: vscode.TextDocument): Lang | undefined {
+export function langForDocument(doc: vscode.TextDocument): Lang | undefined {
   const ext = path.extname(doc.uri.fsPath).toLowerCase();
   const known = langForExtension(ext);
   if (known) return known;

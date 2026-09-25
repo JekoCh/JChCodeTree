@@ -21,6 +21,12 @@ export function langForExtension(ext: string): Lang | undefined {
   return undefined;
 }
 
+export function parseFunctions(lang: Lang, text: string): FunctionInfo[] {
+  if (lang === 'perl') return parsePerlFunctions(text);
+  if (lang === 'js') return parseJsFunctions(text);
+  return parseShFunctions(text);
+}
+
 export class TreeNode {
   functionsLoaded = false;
   children?: TreeNode[];
@@ -109,11 +115,12 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     fileNode.functionsLoaded = true;
     let infos: FunctionInfo[] = [];
     try {
-      const bytes = await vscode.workspace.fs.readFile(fileNode.uri);
-      const text = Buffer.from(bytes).toString('utf8');
-      if (fileNode.lang === 'perl') infos = parsePerlFunctions(text);
-      else if (fileNode.lang === 'js') infos = parseJsFunctions(text);
-      else if (fileNode.lang === 'sh') infos = parseShFunctions(text);
+      // An open editor may hold unsaved edits - parse what the user sees, not the disk copy.
+      const openDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === fileNode.uri.fsPath);
+      const text = openDoc
+        ? openDoc.getText()
+        : Buffer.from(await vscode.workspace.fs.readFile(fileNode.uri)).toString('utf8');
+      infos = parseFunctions(fileNode.lang!, text);
     } catch {
       infos = [];
     }
@@ -122,7 +129,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     );
   }
 
-  /** Drops the cached function list for a file so the next expand re-parses it from disk. */
+  /** Drops the cached function list for a file so the next expand re-parses it. */
   async invalidateFile(uri: vscode.Uri): Promise<void> {
     const node = await this.resolveFileNode(uri.fsPath);
     if (node) {
@@ -157,6 +164,32 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     return (index.get(name) ?? [])
       .filter(e => e.lang === lang)
       .map(e => new vscode.Location(e.uri, new vscode.Position(e.line, 0)));
+  }
+
+  /** Project-wide function search for Ctrl+T: case-insensitive, query chars in order (VS Code re-scores). */
+  async searchSymbols(query: string, langs: Set<Lang>): Promise<vscode.SymbolInformation[]> {
+    const index = await this.ensureDefinitionIndex();
+    const q = query.toLowerCase();
+    const matches = (name: string): boolean => {
+      const n = name.toLowerCase();
+      let i = 0;
+      for (const ch of n) if (ch === q[i]) i++;
+      return i === q.length;
+    };
+    const results: vscode.SymbolInformation[] = [];
+    for (const [name, entries] of index) {
+      if (!matches(name)) continue;
+      for (const e of entries) {
+        if (!langs.has(e.lang)) continue;
+        results.push(new vscode.SymbolInformation(
+          name,
+          vscode.SymbolKind.Function,
+          vscode.workspace.asRelativePath(e.uri),
+          new vscode.Location(e.uri, new vscode.Position(e.line, 0))
+        ));
+      }
+    }
+    return results;
   }
 
   findFileNode(fsPath: string): TreeNode | undefined {
@@ -262,11 +295,23 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     // Extensionless files only qualify when they look like a shell script.
     if (path.basename(uri.fsPath).startsWith('.')) return 'skip';
     try {
-      const bytes = await vscode.workspace.fs.readFile(uri);
-      const firstLine = Buffer.from(bytes).toString('utf8').split(/\r?\n/, 1)[0];
+      const firstLine = (await this.readHead(uri)).split(/\r?\n/, 1)[0];
       return SHEBANG_SHELL_RE.test(firstLine) ? 'sh' : 'skip';
     } catch {
       return 'skip';
+    }
+  }
+
+  /** First bytes of a file - enough for a shebang, without reading big extensionless files whole. */
+  private async readHead(uri: vscode.Uri): Promise<string> {
+    if (uri.scheme !== 'file') return Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+    const fh = await fsp.open(uri.fsPath, 'r');
+    try {
+      const buf = Buffer.alloc(256);
+      const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+      return buf.toString('utf8', 0, bytesRead);
+    } finally {
+      await fh.close();
     }
   }
 
