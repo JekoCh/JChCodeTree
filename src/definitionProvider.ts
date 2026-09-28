@@ -2,12 +2,27 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { CodeTreeProvider, Lang, extensionsFor, langForExtension, packageAtLine, SHEBANG_SHELL_RE, FILE_REF_RE } from './treeProvider';
 import { parsePerlPackages } from './parsers';
+import { templateKeyAt } from './templates';
 
 // Mirrors PERL_SUB_RE's namespaced-sub capture (Foo::Bar::baz) and the JS patterns' $-prefixed names,
 // so the clicked word matches the full name parsers.ts indexed the definition under.
 export const DEFINITION_WORD_RE = /[A-Za-z_$][\w$]*(?:::\w+)*/;
 /** `Foo::Bar->` right before the word (a class-method call); `$obj->` is excluded by the lookbehind. */
 const CLASS_ARROW_RE = /(?<![$@%\w:])([A-Za-z_]\w*(?:::\w+)*)\s*->\s*$/;
+
+/** `App.Admin.` right before the word (a member call); `$obj.`/`this.` included. */
+const JS_MEMBER_RE = /(?<![\w$.])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*\.\s*$/;
+
+/**
+ * The object path a JS call is made on: `App.save()` -> `App`. A member call on
+ * something that isn't a plain path (`$('#x').val()`) gets '?', which matches no definition -
+ * so it is never pinned to a same-named function in the caller's file.
+ */
+function jsQualifier(document: vscode.TextDocument, range: vscode.Range): string | undefined {
+  const before = document.lineAt(range.start.line).text.slice(0, range.start.character);
+  if (!/\.\s*$/.test(before)) return undefined;
+  return JS_MEMBER_RE.exec(before)?.[1] ?? '?';
+}
 
 /** Same classification as treeProvider's classify(), but off an already-open document (no disk read). */
 export function langForDocument(doc: vscode.TextDocument): Lang | undefined {
@@ -34,13 +49,24 @@ export class FunctionDefinitionProvider implements vscode.DefinitionProvider {
     position: vscode.Position
   ): Promise<vscode.Location[] | undefined> {
     const lang = langForDocument(document);
+    // A variable in <TMPL_VAR/IF/UNLESS/LOOP ...>: where Perl sets it.
+    if (lang === 'html') {
+      const key = templateKeyAt(document.lineAt(position.line).text, position.character);
+      if (key) {
+        const locations = await this.provider.findTemplateKey(key, document.uri);
+        if (locations.length) return locations;
+      }
+    }
     if (lang) {
       const range = document.getWordRangeAtPosition(position, DEFINITION_WORD_RE);
       if (range) {
         const word = document.getText(range);
         const locations = lang === 'perl'
           ? await this.perlDefinitions(document, range, word)
-          : await this.provider.findDefinitions(word, lang, { uri: document.uri });
+          : await this.provider.findDefinitions(word, lang, {
+            uri: document.uri,
+            qualifier: lang === 'sh' ? undefined : jsQualifier(document, range),
+          });
         if (locations.length) return locations;
       }
     }

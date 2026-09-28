@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { CodeTreeProvider, TreeNode, FILE_REF_RE } from './treeProvider';
 import { FunctionDefinitionProvider, buildDefinitionSelector } from './definitionProvider';
 import {
@@ -68,7 +69,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Tree context menu.
   context.subscriptions.push(
     vscode.commands.registerCommand('JChCodeTree.copyName', (node: TreeNode) =>
-      vscode.env.clipboard.writeText(node.label)),
+      vscode.env.clipboard.writeText(node.qualifier ? `${node.qualifier}.${node.name}` : node.label)),
     vscode.commands.registerCommand('JChCodeTree.copyRelativePath', (node: TreeNode) =>
       vscode.env.clipboard.writeText(vscode.workspace.asRelativePath(node.uri, false))),
     vscode.commands.registerCommand('JChCodeTree.openToSide', async (node: TreeNode) => {
@@ -114,6 +115,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
+  // Templates that <TMPL_INCLUDE> the given one (tree context menu) or the active editor's file.
+  context.subscriptions.push(
+    vscode.commands.registerCommand('JChCodeTree.showIncludedBy', async (node?: TreeNode) => {
+      const uri = node?.uri ?? vscode.window.activeTextEditor?.document.uri;
+      if (!uri) return;
+      const locations = await provider.findIncluders(uri);
+      const name = path.basename(uri.fsPath);
+      if (locations.length === 0) {
+        vscode.window.setStatusBarMessage(`Code Tree: no template includes "${name}"`, 3000);
+        return;
+      }
+      const picked = await vscode.window.showQuickPick(
+        locations.map(loc => ({ label: vscode.workspace.asRelativePath(loc.uri), description: `line ${loc.range.start.line + 1}`, location: loc })),
+        { placeHolder: `Templates that include "${name}"` }
+      );
+      if (picked) await openLocation(picked.location);
+    })
+  );
+
   // Files only open on a second click within this window; a single click just
   // toggles the tree's expand/collapse (VS Code's default row-click behavior).
   // Functions have no children to expand, so they open on every click.
@@ -148,7 +168,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // Watches everything (not just known extensions) so extensionless shell scripts
   // appearing/disappearing also trigger a rebuild; scheduleRebuild is debounced.
   const watcher = vscode.workspace.createFileSystemWatcher('**/*');
-  watcher.onDidCreate(scheduleRebuild);
+  // A re-created file must not keep the old one's cached data into the rebuilt tree.
+  watcher.onDidCreate(uri => {
+    provider.invalidateFile(uri);
+    scheduleRebuild();
+  });
   watcher.onDidDelete(scheduleRebuild);
   watcher.onDidChange(uri => {
     if (uri.scheme === 'file') provider.invalidateFile(uri);

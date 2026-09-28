@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { promises as fsp } from 'fs';
 import { parsePerlFunctions, parsePerlPackages, parseJsFunctions, parseHtmlFunctions, parseShFunctions, FunctionInfo, PackageInfo } from './parsers';
+import { parseTemplateIncludes, parsePerlTemplateInfo, pathEndsWith, KeyOccurrence, PerlTemplateInfo, TemplateInclude } from './templates';
 
 export const SHEBANG_SHELL_RE = /^#!.*\b(?:bash|zsh|ksh|dash|sh)\b/;
 /** A path-like token: something/like/this.ext — used to spot file references for "open this file". */
@@ -17,7 +18,8 @@ function langFamily(lang: Lang): Lang {
   return lang === 'html' ? 'js' : lang;
 }
 
-type DefEntry = { uri: vscode.Uri; line: number; lang: Lang; /** Perl: package in effect at the sub */ pkg?: string };
+/** `pkg`: Perl - the package in effect at the sub; JS - the object path before the name (`App` in `App.save = function`). */
+type DefEntry = { uri: vscode.Uri; line: number; lang: Lang; pkg?: string };
 
 /** Shown extension -> its parser ('none' = shown without functions). Reloaded from settings on every build(). */
 let extensionKinds = new Map<string, Lang | 'none'>();
@@ -105,6 +107,12 @@ export class TreeNode {
   packages?: PackageInfo[];
   /** File nodes: every function node, flat - `children` may group them under package nodes */
   functions?: TreeNode[];
+  /** Template files: their `<TMPL_INCLUDE>`s; Perl files: template paths and keys they set. Cleared by invalidateFile(). */
+  templateData?: { includes?: TemplateInclude[]; perl?: PerlTemplateInfo; /** template extensions the Perl data was parsed with */ exts?: string };
+  /** Function nodes: the name lookups use - the label may add the qualifier (`App.save`) */
+  name?: string;
+  /** JS function nodes: object path before the name (`App` in `App.save = function`) */
+  qualifier?: string;
 
   constructor(
     public kind: NodeKind,
@@ -113,6 +121,21 @@ export class TreeNode {
     public parent?: TreeNode,
     public line?: number
   ) {}
+}
+
+/** HTML::Template links, built lazily over the whole project and dropped together with the definition index. */
+type TemplateIndex = {
+  /** template fsPath -> the `<TMPL_INCLUDE>` tags that include it */
+  includedBy: Map<string, vscode.Location[]>;
+  perl: { node: TreeNode; info: PerlTemplateInfo }[];
+};
+
+/** Lines of the sub containing `line` (`subLines`: sub start lines): up to the next sub; the whole file when no sub starts before it. */
+function subRange(subLines: number[], line: number): [number, number] {
+  let i = -1;
+  while (i + 1 < subLines.length && subLines[i + 1] <= line) i++;
+  if (i < 0) return [0, Infinity];
+  return [subLines[i], i + 1 < subLines.length ? subLines[i + 1] - 1 : Infinity];
 }
 
 function sortFolderChildren(node: TreeNode): void {
@@ -141,6 +164,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private indexGen = 0;
   /** Bumped by each build(); only the latest build may publish its tree. */
   private buildGen = 0;
+  private templateIndex?: TemplateIndex;
 
   async refresh(): Promise<void> {
     if (!(await this.build())) return;
@@ -150,6 +174,7 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   private dropDefinitionIndex(): void {
     this.definitionIndex = undefined;
+    this.templateIndex = undefined;
     this.indexGen++;
   }
 
@@ -167,10 +192,11 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       item.collapsibleState = parseable
         ? vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None;
-      item.contextValue = 'file';
+      // Templates (files parsed as HTML) get their own value for "Show Included By".
+      item.contextValue = node.lang === 'html' ? 'template' : 'file';
       item.command = { command: 'JChCodeTree.openItem', title: 'Open', arguments: [node] };
     } else if (node.kind === 'package') {
-      item.iconPath = new vscode.ThemeIcon('symbol-namespace');
+      item.iconPath = new vscode.ThemeIcon(node.parent?.lang === 'perl' ? 'symbol-namespace' : 'symbol-object');
       item.collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
       item.contextValue = 'package';
     } else {
@@ -221,10 +247,14 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
     if (gen !== fileNode.loadGen) return;
     fileNode.packages = packages;
-    fileNode.functions = infos.map(
-      info => new TreeNode('function', info.name, fileNode.uri, fileNode, info.line)
-    );
-    fileNode.children = this.groupByPackage(fileNode);
+    fileNode.functions = infos.map(info => {
+      const label = info.qualifier ? `${info.qualifier}.${info.name}` : info.name;
+      const node = new TreeNode('function', label, fileNode.uri, fileNode, info.line);
+      node.name = info.name;
+      node.qualifier = info.qualifier;
+      return node;
+    });
+    fileNode.children = fileNode.packages ? this.groupByPackage(fileNode) : this.groupByObject(fileNode);
   }
 
   /**
@@ -252,6 +282,35 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       return functions;
     }
     return [...groups.values()];
+  }
+
+  /**
+   * JS: when a file's functions sit on 2+ different objects (no object counts as one), those with an
+   * object go under one node per object (`App`, `App.Admin` - not nested), shown by their short name;
+   * functions without an object stay at the top. Groups appear where their first function is.
+   */
+  private groupByObject(fileNode: TreeNode): TreeNode[] {
+    const functions = fileNode.functions!;
+    if (new Set(functions.map(fn => fn.qualifier ?? '')).size < 2) return functions;
+    const result: TreeNode[] = [];
+    const groups = new Map<string, TreeNode>();
+    for (const fn of functions) {
+      if (!fn.qualifier) {
+        result.push(fn);
+        continue;
+      }
+      let group = groups.get(fn.qualifier);
+      if (!group) {
+        group = new TreeNode('package', fn.qualifier, fileNode.uri, fileNode, fn.line);
+        group.children = [];
+        groups.set(fn.qualifier, group);
+        result.push(group);
+      }
+      group.children!.push(fn);
+      fn.parent = group;
+      fn.label = fn.name!;
+    }
+    return result;
   }
 
   /** An open editor may hold unsaved edits - read what the user sees, not the disk copy. */
@@ -294,17 +353,24 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     return perFile.flat();
   }
 
-  /** Drops the cached function list for a file so the next expand re-parses it. */
+  /**
+   * Drops a file's cached functions/template data so they are parsed again. For a folder (the watcher
+   * reports a re-created folder, not the files in it) every file under it is dropped.
+   */
   async invalidateFile(uri: vscode.Uri): Promise<void> {
     const node = await this.resolveFileNode(uri.fsPath);
-    if (node) {
-      node.loading = undefined;
-      node.loadGen++;
-      node.children = undefined;
-      node.functions = undefined;
-      this.dropDefinitionIndex();
-      this._onDidChangeTreeData.fire(node);
+    const prefix = uri.fsPath + path.sep;
+    const nodes = node ? [node] : [...this.fileIndex.values()].filter(n => n.uri.fsPath.startsWith(prefix));
+    if (!nodes.length) return;
+    for (const n of nodes) {
+      n.loading = undefined;
+      n.loadGen++;
+      n.children = undefined;
+      n.functions = undefined;
+      n.templateData = undefined;
+      this._onDidChangeTreeData.fire(n);
     }
+    this.dropDefinitionIndex();
   }
 
   private async ensureDefinitionIndex(): Promise<Map<string, DefEntry[]>> {
@@ -318,11 +384,12 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     for (const fileNode of fileNodes) {
       for (const child of fileNode.functions ?? []) {
         const line = child.line ?? 0;
-        const pkg = fileNode.packages ? packageAtLine(fileNode.packages, line) : undefined;
+        const pkg = fileNode.packages ? packageAtLine(fileNode.packages, line) : child.qualifier;
         const entry = { uri: fileNode.uri, line, lang: fileNode.lang!, pkg };
-        const list = index.get(child.label);
+        const name = child.name ?? child.label;
+        const list = index.get(name);
         if (list) list.push(entry);
-        else index.set(child.label, [entry]);
+        else index.set(name, [entry]);
       }
       for (const p of fileNode.packages ?? []) {
         if (!p.declared) continue;
@@ -340,8 +407,8 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   /**
    * Go to Definition, restricted to the caller's language. When the call site pins it down, only
    * those matches are returned, so F12 jumps straight there instead of listing every `sub new`:
-   *  - with a qualifier (`Foo::bar`, `Foo->bar`): subs declared in package Foo;
-   *  - without one: subs in the caller's own file and package.
+   *  - with a qualifier (`Foo::bar`, `Foo->bar`; JS `Foo.bar`): subs declared in package Foo / assigned to `Foo.bar`;
+   *  - without one: subs in the caller's own file and package (JS: unqualified functions in the caller's file).
    * Otherwise (e.g. an inherited method) every same-language definition is returned.
    */
   async findDefinitions(
@@ -354,7 +421,106 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     const pinned = from.qualifier
       ? all.filter(e => e.pkg === from.qualifier)
       : all.filter(e => e.uri.fsPath === from.uri.fsPath && e.pkg === from.pkg);
-    return (pinned.length ? pinned : all).map(e => new vscode.Location(e.uri, new vscode.Position(e.line, 0)));
+    // Several files may assign the same `this.init` / declare the same package: the caller's own file wins.
+    const local = pinned.filter(e => e.uri.fsPath === from.uri.fsPath);
+    const best = local.length ? local : pinned.length ? pinned : all;
+    return best.map(e => new vscode.Location(e.uri, new vscode.Position(e.line, 0)));
+  }
+
+  private async ensureTemplateIndex(): Promise<TemplateIndex> {
+    if (this.templateIndex) return this.templateIndex;
+    const gen = this.indexGen;
+    const nodes = [...this.fileIndex.values()];
+    const templates = nodes.filter(n => n.lang === 'html');
+    const byBase = new Map<string, TreeNode[]>();
+    for (const t of templates) {
+      const base = path.basename(t.uri.fsPath);
+      byBase.set(base, [...(byBase.get(base) ?? []), t]);
+    }
+    // HTML::Template-style: next to the including template first, else a template whose path ends with the
+    // name - of those, the closest one (longest common folder with the includer): `/_head.html` means the
+    // _head.html of the same template root, not of every site in the project.
+    const resolve = (from: TreeNode, name: string): TreeNode[] => {
+      if (!name.startsWith('/')) {
+        const beside = this.fileIndex.get(path.join(path.dirname(from.uri.fsPath), name));
+        if (beside) return [beside];
+      }
+      const candidates = (byBase.get(path.basename(name)) ?? []).filter(t => pathEndsWith(t.uri.fsPath, name));
+      const shared = (t: TreeNode) => {
+        const a = from.uri.fsPath.split(path.sep), b = t.uri.fsPath.split(path.sep);
+        let n = 0;
+        while (n < a.length - 1 && n < b.length - 1 && a[n] === b[n]) n++;
+        return n;
+      };
+      const best = Math.max(...candidates.map(shared));
+      return candidates.filter(t => shared(t) === best);
+    };
+    const exts = extensionsFor('html');
+    const extsKey = exts.join(',');
+    // Parsed once per file and kept on the node, so after an edit only the edited file is read again.
+    // Perl data depends on which extensions are templates, so a changed setting parses it again.
+    const data = async (n: TreeNode): Promise<NonNullable<TreeNode['templateData']>> => {
+      if (n.templateData && (n.lang !== 'perl' || n.templateData.exts === extsKey)) return n.templateData;
+      const fileGen = n.loadGen;
+      const text = await this.readText(n.uri).catch(() => '');
+      const parsed = n.lang === 'perl' ? { perl: parsePerlTemplateInfo(text, exts), exts: extsKey } : { includes: parseTemplateIncludes(text) };
+      if (fileGen === n.loadGen) n.templateData = parsed;
+      return parsed;
+    };
+
+    const includedBy = new Map<string, vscode.Location[]>();
+    await Promise.all(templates.map(async from => {
+      for (const inc of (await data(from)).includes ?? []) {
+        for (const target of resolve(from, inc.name)) {
+          const loc = new vscode.Location(from.uri, new vscode.Position(inc.line, 0));
+          includedBy.set(target.uri.fsPath, [...(includedBy.get(target.uri.fsPath) ?? []), loc]);
+        }
+      }
+    }));
+    const perl = await Promise.all(nodes.filter(n => n.lang === 'perl').map(async node => ({ node, info: (await data(node)).perl! })));
+
+    const index = { includedBy, perl };
+    if (gen === this.indexGen) this.templateIndex = index;
+    return index;
+  }
+
+  /** The `<TMPL_INCLUDE>` tags that include this template. */
+  async findIncluders(uri: vscode.Uri): Promise<vscode.Location[]> {
+    const node = await this.resolveFileNode(uri.fsPath);
+    if (!node) return [];
+    return (await this.ensureTemplateIndex()).includedBy.get(node.uri.fsPath) ?? [];
+  }
+
+  /**
+   * F12 on a template variable: where Perl sets it. Preferred: inside the subs that name this template
+   * or one that (transitively) includes it - so two templates using the same key each lead to their own
+   * module. Otherwise (key set dynamically, in a helper or a base class) every place Perl sets the key.
+   */
+  async findTemplateKey(key: string, uri: vscode.Uri): Promise<vscode.Location[]> {
+    const index = await this.ensureTemplateIndex();
+    const start = (await this.resolveFileNode(uri.fsPath))?.uri.fsPath ?? uri.fsPath;
+    const linked = new Set([start]);
+    for (const t of linked) for (const loc of index.includedBy.get(t) ?? []) linked.add(loc.uri.fsPath);
+
+    const all: { node: TreeNode; o: KeyOccurrence }[] = [];
+    const pinned: { node: TreeNode; o: KeyOccurrence }[] = [];
+    for (const { node, info } of index.perl) {
+      const occurrences = info.keys.get(key.toUpperCase());
+      if (!occurrences) continue;
+      all.push(...occurrences.map(o => ({ node, o })));
+      const refs = info.templateRefs.filter(r => [...linked].some(t => pathEndsWith(t, r.path)));
+      const ranges = refs.map(r => subRange(info.subLines, r.line));
+      pinned.push(...occurrences.filter(o => ranges.some(([from, to]) => o.line >= from && o.line <= to)).map(o => ({ node, o })));
+    }
+    // Narrow step by step, keeping a step only if something is left: `KEY =>` appears in all kinds of
+    // hashes, so direct `->{KEY} =` assignments first; then the key written exactly as in the template
+    // (`$row->{title} =` is usually a DB row, not the `TITLE` template variable).
+    let found = pinned.length ? pinned : all;
+    for (const keep of [(o: KeyOccurrence) => o.direct, (o: KeyOccurrence) => o.name === key]) {
+      const narrowed = found.filter(f => keep(f.o));
+      if (narrowed.length) found = narrowed;
+    }
+    return found.map(({ node, o }) => new vscode.Location(node.uri, new vscode.Range(o.line, o.col, o.line, o.col + o.len)));
   }
 
   /** Where a Perl package (`use Foo::Bar;`) is declared. */
@@ -590,6 +756,13 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
 
     if (gen !== this.buildGen) return false;
+    // Keep each unchanged file's parsed template data (changes clear it via invalidateFile), so a rebuild
+    // after a file is created/deleted doesn't make the next template F12 re-read the whole project.
+    // Done here, in the same tick as the swap, so an invalidation can't slip in between.
+    for (const [fsPath, node] of fileIndex) {
+      const old = this.fileIndex.get(fsPath);
+      if (old && old.lang === node.lang) node.templateData = old.templateData;
+    }
     this.fileIndex = fileIndex;
     this.roots = roots;
     return true;

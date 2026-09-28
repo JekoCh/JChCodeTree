@@ -2,6 +2,8 @@ export interface FunctionInfo {
   name: string;
   /** 0-based line index where the function starts */
   line: number;
+  /** JS: the object path before the name - `App.Admin` in `App.Admin.check = function` */
+  qualifier?: string;
 }
 
 /** Matches `sub name {`, `sub name;` (forward decl) is skipped by requiring a brace or end of line body. */
@@ -105,6 +107,9 @@ const JS_PATTERNS: RegExp[] = [
   /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\b/,
   // const foo = (...) => ...   /  const foo = (x: string): number => ...
   /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=>{]+)?=>/,
+  // foo = function(...)  /  App.save = function(...)  /  this.x = (a) => ...
+  // DOM event handlers (`el.onclick = function`) are skipped: anonymous callbacks, not named functions.
+  /^\s*(?:(?<qualifier>[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.)?(?!on(?:click|dblclick|mouse[a-z]*|key[a-z]*|load|unload|beforeunload|change|input|submit|reset|focus|focusin|focusout|blur|error|abort|resize|scroll|select|contextmenu|drag[a-z]*|drop|touch[a-z]*|pointer[a-z]*|wheel|readystatechange|message|open|close|progress|timeout|hashchange|popstate|storage|paste|copy|cut|animation[a-z]*|transition[a-z]*)\s*=)(?<name>[A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:function\b|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/,
   // class method / object method shorthand: name(...) {  /  private async name(...): Type {
   // A `function` inside the parens means a call taking a callback (`$(function() {`, `setTimeout(function () {`).
   /^\s*(?:public\s+|private\s+|protected\s+|readonly\s+)*(?:static\s+)?(?:async\s+)?(?:\*\s*)?([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\((?![^)]*\bfunction\b)[^)]*\)\s*(?::\s*[^{]+)?\{/,
@@ -117,8 +122,10 @@ export function parseJsFunctions(text: string): FunctionInfo[] {
     const line = lines[i];
     for (const re of JS_PATTERNS) {
       const m = re.exec(line);
-      if (m && !JS_CONTROL_KEYWORDS.has(m[1])) {
-        results.push({ name: m[1], line: i });
+      const name = m?.groups?.name ?? m?.[1];
+      if (name && !JS_CONTROL_KEYWORDS.has(name)) {
+        const qualifier = m!.groups?.qualifier;
+        results.push(qualifier ? { name, line: i, qualifier } : { name, line: i });
         break;
       }
     }
