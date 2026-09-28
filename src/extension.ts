@@ -4,7 +4,7 @@ import { FunctionDefinitionProvider, buildDefinitionSelector } from './definitio
 import {
   FunctionDocumentSymbolProvider, FunctionWorkspaceSymbolProvider, FunctionReferenceProvider, buildSymbolSelector,
 } from './symbolProvider';
-import { checkForUpdate } from './updater';
+import { checkForUpdate, startPeriodicUpdateCheck } from './updater';
 
 async function openNodeInEditor(node: TreeNode): Promise<void> {
   const doc = await vscode.workspace.openTextDocument(node.uri);
@@ -24,6 +24,17 @@ async function openLocation(location: vscode.Location): Promise<void> {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   void checkForUpdate(context);
+  let periodicUpdate = startPeriodicUpdateCheck(context);
+  context.subscriptions.push(
+    { dispose: () => periodicUpdate.dispose() },
+    vscode.commands.registerCommand('JChCodeTree.checkForUpdates', () => checkForUpdate(context, true)),
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration('JChCodeTree.autoUpdateIntervalHours')) {
+        periodicUpdate.dispose();
+        periodicUpdate = startPeriodicUpdateCheck(context);
+      }
+    })
+  );
 
   const provider = new CodeTreeProvider();
   await provider.refresh();

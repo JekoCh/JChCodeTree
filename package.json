@@ -2,7 +2,7 @@
   "name": "JCh-code-tree",
   "displayName": "Code File & Function Tree",
   "description": "Tree view of workspace files (pl/pm/cgi/html/js/css/ts/tsx/sh/json, plus shebang scripts) with Perl/JS/TS/shell functions nested underneath, synced with the cursor.",
-  "version": "0.0.25",
+  "version": "0.0.26",
   "publisher": "jchakarov",
   "icon": "media/icon.png",
   "private": true,
@@ -41,6 +41,10 @@
       {
         "command": "JChCodeTree.openSelectedFile",
         "title": "Code Tree: Open Selected File"
+      },
+      {
+        "command": "JChCodeTree.checkForUpdates",
+        "title": "Code Tree: Check for Updates"
       },
       {
         "command": "JChCodeTree.copyName",
@@ -105,14 +109,15 @@
             ".pl": "perl", ".pm": "perl", ".cgi": "perl",
             ".js": "js", ".ts": "js", ".tsx": "js",
             ".sh": "sh",
-            ".html": "none", ".css": "none", ".json": "none"
+            ".html": "html", ".css": "none", ".json": "none"
           },
           "additionalProperties": {
             "type": "string",
-            "enum": ["perl", "js", "sh", "none", "hide"],
+            "enum": ["perl", "js", "html", "sh", "none", "hide"],
             "enumDescriptions": [
               "Shown, with Perl subs underneath",
               "Shown, with JS/TS functions underneath",
+              "Shown, with the JS functions from its <script> blocks underneath",
               "Shown, with shell functions underneath",
               "Shown, without functions",
               "Not shown (use this to remove one of the defaults)"
@@ -141,7 +146,14 @@
           "type": "boolean",
           "default": true,
           "scope": "machine",
-          "description": "On startup, install a newer version from github.com/JekoCh/JChCodeTree if one is published."
+          "description": "On startup (and every autoUpdateIntervalHours), install a newer version from github.com/JekoCh/JChCodeTree if one is published."
+        },
+        "JChCodeTree.autoUpdateIntervalHours": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "scope": "machine",
+          "description": "While a window is open, check for a newer version every this many hours (only when autoUpdate is on). 0 = check on startup only."
         }
       }
     },

@@ -2,8 +2,8 @@ import * as vscode from 'vscode';
 import { CodeTreeProvider, Lang, extensionsFor, parseFunctions } from './treeProvider';
 import { DEFINITION_WORD_RE, langForDocument } from './definitionProvider';
 
-// JS/TS are left out: VS Code's built-in TypeScript support already provides their symbols
-// and references, and adding ours would show every result twice.
+// JS/TS/HTML are left out: VS Code's built-in TypeScript/HTML support already provides their
+// symbols and references, and adding ours would show every result twice.
 const SYMBOL_LANGS = new Set<Lang>(['perl', 'sh']);
 
 export function buildSymbolSelector(): vscode.DocumentSelector {

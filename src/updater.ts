@@ -39,20 +39,49 @@ function isNewer(a: string, b: string): boolean {
   return false;
 }
 
-// Compares the running version with package.json on GitHub; if GitHub is newer, downloads
-// its .vsix, installs it and offers a window reload. Network errors are silent - next start retries.
-export async function checkForUpdate(context: vscode.ExtensionContext): Promise<void> {
-  if (!vscode.workspace.getConfiguration('JChCodeTree').get<boolean>('autoUpdate', true)) return;
+/** Version installed by this window but not yet running (no reload yet) - later checks compare against it. */
+let installedVersion: string | undefined;
+let inFlight: Promise<void> | undefined;
 
-  const { name, version: current } = context.extension.packageJSON as { name: string; version: string };
+// Compares the running version with package.json on GitHub; if GitHub is newer, downloads
+// its .vsix, installs it and offers a window reload. Automatic checks skip when autoUpdate is off
+// and stay silent on network errors (the next check retries); a manual check always runs and reports.
+export function checkForUpdate(context: vscode.ExtensionContext, manual = false): Promise<void> {
+  if (!manual && !vscode.workspace.getConfiguration('JChCodeTree').get<boolean>('autoUpdate', true)) {
+    return Promise.resolve();
+  }
+  inFlight ??= runCheck(context, manual).finally(() => { inFlight = undefined; });
+  return inFlight;
+}
+
+/** Re-checks every JChCodeTree.autoUpdateIntervalHours (0 = startup only); call again after a settings change. */
+export function startPeriodicUpdateCheck(context: vscode.ExtensionContext): vscode.Disposable {
+  const hours = vscode.workspace.getConfiguration('JChCodeTree').get<number>('autoUpdateIntervalHours', 4);
+  if (!(hours > 0)) return new vscode.Disposable(() => {});
+  const timer = setInterval(() => void checkForUpdate(context), hours * 3600 * 1000);
+  return new vscode.Disposable(() => clearInterval(timer));
+}
+
+async function runCheck(context: vscode.ExtensionContext, manual: boolean): Promise<void> {
+  const { name, version: running } = context.extension.packageJSON as { name: string; version: string };
+  const current = installedVersion ?? running;
 
   let latest: string;
   let data: Buffer;
   try {
     latest = JSON.parse((await download(RAW_BASE + 'package.json')).toString('utf8')).version;
-    if (!isNewer(latest, current)) return;
+    if (!isNewer(latest, current)) {
+      if (manual) {
+        const msg = installedVersion
+          ? `Code Tree ${installedVersion} is already installed. Reload the window to use it.`
+          : `Code Tree is up to date (${running}).`;
+        vscode.window.showInformationMessage(msg);
+      }
+      return;
+    }
     data = await download(`${RAW_BASE}version/${name}-${latest}.vsix`);
-  } catch {
+  } catch (err) {
+    if (manual) vscode.window.showWarningMessage(`Code Tree: update check failed: ${err}`);
     return;
   }
 
@@ -67,10 +96,13 @@ export async function checkForUpdate(context: vscode.ExtensionContext): Promise<
   } finally {
     await fs.rm(file, { force: true });
   }
+  installedVersion = latest;
 
-  const choice = await vscode.window.showInformationMessage(
+  // Not awaited: an unanswered prompt must not keep the check "in flight".
+  void vscode.window.showInformationMessage(
     `Code Tree updated to ${latest}. Reload the window to use it.`,
     'Reload'
-  );
-  if (choice === 'Reload') await vscode.commands.executeCommand('workbench.action.reloadWindow');
+  ).then(choice => {
+    if (choice === 'Reload') void vscode.commands.executeCommand('workbench.action.reloadWindow');
+  });
 }

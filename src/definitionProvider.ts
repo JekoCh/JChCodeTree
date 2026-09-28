@@ -1,10 +1,13 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { CodeTreeProvider, Lang, extensionsFor, langForExtension, SHEBANG_SHELL_RE, FILE_REF_RE } from './treeProvider';
+import { CodeTreeProvider, Lang, extensionsFor, langForExtension, packageAtLine, SHEBANG_SHELL_RE, FILE_REF_RE } from './treeProvider';
+import { parsePerlPackages } from './parsers';
 
 // Mirrors PERL_SUB_RE's namespaced-sub capture (Foo::Bar::baz) and the JS patterns' $-prefixed names,
 // so the clicked word matches the full name parsers.ts indexed the definition under.
 export const DEFINITION_WORD_RE = /[A-Za-z_$][\w$]*(?:::\w+)*/;
+/** `Foo::Bar->` right before the word (a class-method call); `$obj->` is excluded by the lookbehind. */
+const CLASS_ARROW_RE = /(?<![$@%\w:])([A-Za-z_]\w*(?:::\w+)*)\s*->\s*$/;
 
 /** Same classification as treeProvider's classify(), but off an already-open document (no disk read). */
 export function langForDocument(doc: vscode.TextDocument): Lang | undefined {
@@ -17,7 +20,7 @@ export function langForDocument(doc: vscode.TextDocument): Lang | undefined {
 }
 
 export function buildDefinitionSelector(): vscode.DocumentSelector {
-  const exts = [...extensionsFor('perl'), ...extensionsFor('js'), ...extensionsFor('sh')];
+  const exts = [...extensionsFor('perl'), ...extensionsFor('js'), ...extensionsFor('html'), ...extensionsFor('sh')];
   const filters: vscode.DocumentFilter[] = exts.map(ext => ({ scheme: 'file', pattern: `**/*${ext}` }));
   filters.push({ scheme: 'file', language: 'shellscript' });
   return filters;
@@ -34,7 +37,10 @@ export class FunctionDefinitionProvider implements vscode.DefinitionProvider {
     if (lang) {
       const range = document.getWordRangeAtPosition(position, DEFINITION_WORD_RE);
       if (range) {
-        const locations = await this.provider.findDefinitions(document.getText(range), lang);
+        const word = document.getText(range);
+        const locations = lang === 'perl'
+          ? await this.perlDefinitions(document, range, word)
+          : await this.provider.findDefinitions(word, lang, { uri: document.uri });
         if (locations.length) return locations;
       }
     }
@@ -47,5 +53,30 @@ export class FunctionDefinitionProvider implements vscode.DefinitionProvider {
     }
 
     return undefined;
+  }
+
+  /**
+   * `Foo::bar`: a sub declared by that full name, else the package `Foo::bar` itself, else `bar` in package Foo.
+   * `bar`: the sub, narrowed by `Foo->bar` / `__PACKAGE__->bar` or the caller's package; else package `bar`
+   * (`use Utils;`, the `Foo` in `Foo->new`).
+   */
+  private async perlDefinitions(document: vscode.TextDocument, range: vscode.Range, word: string): Promise<vscode.Location[]> {
+    const pkg = packageAtLine(parsePerlPackages(document.getText()), range.start.line);
+    const from = { uri: document.uri, pkg };
+
+    const sep = word.lastIndexOf('::');
+    if (sep > 0) {
+      const exact = await this.provider.findDefinitions(word, 'perl', from);
+      if (exact.length) return exact;
+      const module = await this.provider.findPackage(word);
+      if (module.length) return module;
+      return this.provider.findDefinitions(word.slice(sep + 2), 'perl', { ...from, qualifier: word.slice(0, sep) });
+    }
+
+    const before = document.lineAt(range.start.line).text.slice(0, range.start.character);
+    const cls = CLASS_ARROW_RE.exec(before)?.[1];
+    const qualifier = cls === '__PACKAGE__' ? pkg : cls;
+    const subs = await this.provider.findDefinitions(word, 'perl', { ...from, qualifier });
+    return subs.length ? subs : this.provider.findPackage(word);
   }
 }

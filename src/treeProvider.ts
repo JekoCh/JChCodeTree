@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { promises as fsp } from 'fs';
-import { parsePerlFunctions, parseJsFunctions, parseShFunctions, FunctionInfo } from './parsers';
+import { parsePerlFunctions, parsePerlPackages, parseJsFunctions, parseHtmlFunctions, parseShFunctions, FunctionInfo } from './parsers';
 
 export const SHEBANG_SHELL_RE = /^#!.*\b(?:bash|zsh|ksh|dash|sh)\b/;
 /** A path-like token: something/like/this.ext — used to spot file references for "open this file". */
@@ -9,7 +9,15 @@ export const FILE_REF_RE = /[\w./-]+\.\w+/;
 const WALK_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'CVS']);
 
 type NodeKind = 'folder' | 'file' | 'function';
-export type Lang = 'perl' | 'js' | 'sh';
+export type Lang = 'perl' | 'js' | 'html' | 'sh';
+const LANGS = new Set<string>(['perl', 'js', 'html', 'sh']);
+
+/** Functions in HTML <script> blocks are JS: calls between .html and .js files resolve to each other. */
+function langFamily(lang: Lang): Lang {
+  return lang === 'html' ? 'js' : lang;
+}
+
+type DefEntry = { uri: vscode.Uri; line: number; lang: Lang; /** Perl: package in effect at the sub */ pkg?: string };
 
 /** Shown extension -> its parser ('none' = shown without functions). Reloaded from settings on every build(). */
 let extensionKinds = new Map<string, Lang | 'none'>();
@@ -21,7 +29,7 @@ function loadExtensionSetting(): void {
   for (const [ext, kind] of Object.entries(raw)) {
     if (kind === 'hide') continue;
     const key = (ext.startsWith('.') ? ext : `.${ext}`).toLowerCase();
-    extensionKinds.set(key, kind === 'perl' || kind === 'js' || kind === 'sh' ? kind : 'none');
+    extensionKinds.set(key, LANGS.has(kind) ? kind as Lang : 'none');
   }
 }
 
@@ -72,13 +80,26 @@ function isExcluded(rel: string, excludes: RegExp[]): boolean {
 export function parseFunctions(lang: Lang, text: string): FunctionInfo[] {
   if (lang === 'perl') return parsePerlFunctions(text);
   if (lang === 'js') return parseJsFunctions(text);
+  if (lang === 'html') return parseHtmlFunctions(text);
   return parseShFunctions(text);
+}
+
+/** Perl package in effect at a 0-based line ('main' before any `package` statement). */
+export function packageAtLine(packages: FunctionInfo[], line: number): string {
+  let pkg = 'main';
+  for (const p of packages) {
+    if (p.line > line) break;
+    pkg = p.name;
+  }
+  return pkg;
 }
 
 export class TreeNode {
   functionsLoaded = false;
   children?: TreeNode[];
   lang?: Lang;
+  /** Perl files: `package` statements, loaded together with the functions */
+  packages?: FunctionInfo[];
 
   constructor(
     public kind: NodeKind,
@@ -108,7 +129,9 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   /** fsPath -> file TreeNode, rebuilt on every refresh() for cursor-sync lookups */
   private fileIndex = new Map<string, TreeNode>();
   /** name -> definition locations, lazily built across the whole project; dropped on any change. */
-  private definitionIndex?: Map<string, { uri: vscode.Uri; line: number; lang: Lang }[]>;
+  private definitionIndex?: Map<string, DefEntry[]>;
+  /** Perl package name -> where it is declared; rebuilt together with definitionIndex. */
+  private packageIndex = new Map<string, { uri: vscode.Uri; line: number }[]>();
 
   async refresh(): Promise<void> {
     await this.build();
@@ -157,8 +180,11 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private async loadFunctions(fileNode: TreeNode): Promise<void> {
     fileNode.functionsLoaded = true;
     let infos: FunctionInfo[] = [];
+    fileNode.packages = undefined;
     try {
-      infos = parseFunctions(fileNode.lang!, await this.readText(fileNode.uri));
+      const text = await this.readText(fileNode.uri);
+      infos = parseFunctions(fileNode.lang!, text);
+      if (fileNode.lang === 'perl') fileNode.packages = parsePerlPackages(text);
     } catch {
       infos = [];
     }
@@ -218,30 +244,57 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
   }
 
-  private async ensureDefinitionIndex(): Promise<Map<string, { uri: vscode.Uri; line: number; lang: Lang }[]>> {
+  private async ensureDefinitionIndex(): Promise<Map<string, DefEntry[]>> {
     if (this.definitionIndex) return this.definitionIndex;
     const fileNodes = [...this.fileIndex.values()].filter(n => n.lang !== undefined);
     await Promise.all(fileNodes.map(n => (n.functionsLoaded ? Promise.resolve() : this.loadFunctions(n))));
 
-    const index = new Map<string, { uri: vscode.Uri; line: number; lang: Lang }[]>();
+    const index = new Map<string, DefEntry[]>();
+    const packages = new Map<string, { uri: vscode.Uri; line: number }[]>();
     for (const fileNode of fileNodes) {
       for (const child of fileNode.children ?? []) {
-        const entry = { uri: fileNode.uri, line: child.line ?? 0, lang: fileNode.lang! };
+        const line = child.line ?? 0;
+        const pkg = fileNode.packages ? packageAtLine(fileNode.packages, line) : undefined;
+        const entry = { uri: fileNode.uri, line, lang: fileNode.lang!, pkg };
         const list = index.get(child.label);
         if (list) list.push(entry);
         else index.set(child.label, [entry]);
       }
+      for (const p of fileNode.packages ?? []) {
+        const list = packages.get(p.name);
+        if (list) list.push({ uri: fileNode.uri, line: p.line });
+        else packages.set(p.name, [{ uri: fileNode.uri, line: p.line }]);
+      }
     }
     this.definitionIndex = index;
+    this.packageIndex = packages;
     return index;
   }
 
-  /** Project-wide lookup for Go to Definition, restricted to the caller's language. */
-  async findDefinitions(name: string, lang: Lang): Promise<vscode.Location[]> {
+  /**
+   * Go to Definition, restricted to the caller's language. When the call site pins it down, only
+   * those matches are returned, so F12 jumps straight there instead of listing every `sub new`:
+   *  - with a qualifier (`Foo::bar`, `Foo->bar`): subs declared in package Foo;
+   *  - without one: subs in the caller's own file and package.
+   * Otherwise (e.g. an inherited method) every same-language definition is returned.
+   */
+  async findDefinitions(
+    name: string,
+    lang: Lang,
+    from: { uri: vscode.Uri; pkg?: string; qualifier?: string }
+  ): Promise<vscode.Location[]> {
     const index = await this.ensureDefinitionIndex();
-    return (index.get(name) ?? [])
-      .filter(e => e.lang === lang)
-      .map(e => new vscode.Location(e.uri, new vscode.Position(e.line, 0)));
+    const all = (index.get(name) ?? []).filter(e => langFamily(e.lang) === langFamily(lang));
+    const pinned = from.qualifier
+      ? all.filter(e => e.pkg === from.qualifier)
+      : all.filter(e => e.uri.fsPath === from.uri.fsPath && e.pkg === from.pkg);
+    return (pinned.length ? pinned : all).map(e => new vscode.Location(e.uri, new vscode.Position(e.line, 0)));
+  }
+
+  /** Where a Perl package (`use Foo::Bar;`) is declared. */
+  async findPackage(name: string): Promise<vscode.Location[]> {
+    await this.ensureDefinitionIndex();
+    return (this.packageIndex.get(name) ?? []).map(p => new vscode.Location(p.uri, new vscode.Position(p.line, 0)));
   }
 
   /** Project-wide function search for Ctrl+T: case-insensitive, query chars in order (VS Code re-scores). */
