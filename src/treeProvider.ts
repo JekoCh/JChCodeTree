@@ -188,8 +188,9 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     } else if (node.kind === 'file') {
       item.resourceUri = node.uri;
       item.iconPath = vscode.ThemeIcon.File;
-      const parseable = node.lang !== undefined;
-      item.collapsibleState = parseable
+      // No expand arrow when the file has no functions (not yet parsed counts as "may have some").
+      const expandable = node.lang !== undefined && (node.children === undefined || node.children.length > 0);
+      item.collapsibleState = expandable
         ? vscode.TreeItemCollapsibleState.Collapsed
         : vscode.TreeItemCollapsibleState.None;
       // Templates (files parsed as HTML) get their own value for "Show Included By".
@@ -209,7 +210,12 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
 
   async getChildren(node?: TreeNode): Promise<TreeNode[]> {
     if (!node) return this.roots;
-    if (node.kind === 'folder') return node.children ?? [];
+    if (node.kind === 'folder') {
+      const children = node.children ?? [];
+      // Parse the files first, so the ones without functions are shown without an expand arrow.
+      await Promise.all(children.filter(c => c.kind === 'file' && c.lang).map(c => this.ensureFunctions(c)));
+      return children;
+    }
     if (node.kind === 'file') {
       await this.ensureFunctions(node);
       return node.children ?? [];
@@ -368,7 +374,9 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
       n.children = undefined;
       n.functions = undefined;
       n.templateData = undefined;
-      this._onDidChangeTreeData.fire(n);
+      // Re-parse before refreshing the row, so its expand arrow matches the new function list.
+      if (n.lang) void this.ensureFunctions(n).then(() => this._onDidChangeTreeData.fire(n));
+      else this._onDidChangeTreeData.fire(n);
     }
     this.dropDefinitionIndex();
   }
