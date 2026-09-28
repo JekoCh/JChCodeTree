@@ -67,7 +67,6 @@ async function runCheck(context: vscode.ExtensionContext, manual: boolean): Prom
   const current = installedVersion ?? running;
 
   let latest: string;
-  let data: Buffer;
   try {
     latest = JSON.parse((await download(RAW_BASE + 'package.json')).toString('utf8')).version;
     if (!isNewer(latest, current)) {
@@ -79,30 +78,106 @@ async function runCheck(context: vscode.ExtensionContext, manual: boolean): Prom
       }
       return;
     }
-    data = await download(`${RAW_BASE}version/${name}-${latest}.vsix`);
   } catch (err) {
     if (manual) vscode.window.showWarningMessage(`Code Tree: update check failed: ${err}`);
     return;
   }
 
-  const file = path.join(context.globalStorageUri.fsPath, `${name}-${latest}.vsix`);
+  // Every open window runs this check, and globalStorage is shared between them. Reinstalling a
+  // version another window already installed deletes it first, so a second install that then
+  // fails leaves no extension at all - hence the on-disk check and the per-version lock.
+  if (await installedOnDisk(context, latest)) {
+    promptReload(latest);
+    return;
+  }
+  const storage = context.globalStorageUri.fsPath;
+  const lock = path.join(storage, `${name}-${latest}.lock`);
+  // Per-window file name: another window's cleanup must not delete this window's download.
+  const file = path.join(storage, `${name}-${latest}-${process.pid}.vsix`);
   try {
-    await fs.mkdir(context.globalStorageUri.fsPath, { recursive: true });
-    await fs.writeFile(file, data);
-    await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(file));
+    await fs.mkdir(storage, { recursive: true });
+    if (!(await acquireLock(lock))) {
+      // Another window is installing - wait for it, then offer this window a reload too.
+      if (manual) vscode.window.showInformationMessage(`Code Tree ${latest} is being installed by another window.`);
+      if (await waitForUnlock(lock) && await installedOnDisk(context, latest)) promptReload(latest);
+      return;
+    }
+  } catch (err) {
+    vscode.window.showWarningMessage(`Code Tree: update to ${latest} failed: ${err}`);
+    return;
+  }
+
+  try {
+    // Re-check under the lock: another window may have finished between the first check and the lock.
+    if (!(await installedOnDisk(context, latest))) {
+      let data: Buffer;
+      try {
+        data = await download(`${RAW_BASE}version/${name}-${latest}.vsix`);
+      } catch (err) {
+        if (manual) vscode.window.showWarningMessage(`Code Tree: update check failed: ${err}`);
+        return;
+      }
+      await fs.writeFile(file, data);
+      await vscode.commands.executeCommand('workbench.extensions.installExtension', vscode.Uri.file(file));
+    }
   } catch (err) {
     vscode.window.showWarningMessage(`Code Tree: update to ${latest} failed: ${err}`);
     return;
   } finally {
     await fs.rm(file, { force: true });
+    await fs.rm(lock, { force: true });
   }
-  installedVersion = latest;
+  promptReload(latest);
+}
 
+function promptReload(version: string): void {
+  installedVersion = version;
   // Not awaited: an unanswered prompt must not keep the check "in flight".
   void vscode.window.showInformationMessage(
-    `Code Tree updated to ${latest}. Reload the window to use it.`,
+    `Code Tree updated to ${version}. Reload the window to use it.`,
     'Reload'
   ).then(choice => {
     if (choice === 'Reload') void vscode.commands.executeCommand('workbench.action.reloadWindow');
   });
+}
+
+/** True when `version` sits next to the running extension (e.g. installed by another window). */
+async function installedOnDisk(context: vscode.ExtensionContext, version: string): Promise<boolean> {
+  const dir = path.join(path.dirname(context.extensionPath), `${context.extension.id}-${version}`.toLowerCase());
+  try {
+    await fs.access(path.join(dir, 'package.json'));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** A lock older than this is left over from a crashed window. */
+const LOCK_STALE_MS = 10 * 60 * 1000;
+
+/** Polls until another window removes the lock; false if it is still there after `timeoutMs`. */
+async function waitForUnlock(file: string, timeoutMs = 2 * 60 * 1000): Promise<boolean> {
+  for (const end = Date.now() + timeoutMs; Date.now() < end;) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      await fs.access(file);
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Creates `file` exclusively; false while another window holds it. */
+async function acquireLock(file: string): Promise<boolean> {
+  try {
+    await (await fs.open(file, 'wx')).close();
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    const { mtimeMs } = await fs.stat(file);
+    if (Date.now() - mtimeMs < LOCK_STALE_MS) return false;
+    await fs.rm(file, { force: true });
+    return acquireLock(file);
+  }
 }
