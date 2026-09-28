@@ -137,7 +137,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     })
   );
 
-  // Keep the tree in sync with files appearing/disappearing on disk.
+  // Keep the tree in sync with files appearing/disappearing on disk, and re-parse files changed
+  // on disk while not open in an editor (git checkout/pull, other tools).
   let rebuildTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleRebuild = () => {
     if (rebuildTimer) clearTimeout(rebuildTimer);
@@ -149,6 +150,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const watcher = vscode.workspace.createFileSystemWatcher('**/*');
   watcher.onDidCreate(scheduleRebuild);
   watcher.onDidDelete(scheduleRebuild);
+  watcher.onDidChange(uri => {
+    if (uri.scheme === 'file') provider.invalidateFile(uri);
+  });
   context.subscriptions.push(watcher);
 
   context.subscriptions.push(

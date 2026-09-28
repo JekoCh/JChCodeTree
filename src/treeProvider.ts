@@ -1,14 +1,14 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { promises as fsp } from 'fs';
-import { parsePerlFunctions, parsePerlPackages, parseJsFunctions, parseHtmlFunctions, parseShFunctions, FunctionInfo } from './parsers';
+import { parsePerlFunctions, parsePerlPackages, parseJsFunctions, parseHtmlFunctions, parseShFunctions, FunctionInfo, PackageInfo } from './parsers';
 
 export const SHEBANG_SHELL_RE = /^#!.*\b(?:bash|zsh|ksh|dash|sh)\b/;
 /** A path-like token: something/like/this.ext — used to spot file references for "open this file". */
 export const FILE_REF_RE = /[\w./-]+\.\w+/;
 const WALK_SKIP_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', 'CVS']);
 
-type NodeKind = 'folder' | 'file' | 'function';
+type NodeKind = 'folder' | 'file' | 'package' | 'function';
 export type Lang = 'perl' | 'js' | 'html' | 'sh';
 const LANGS = new Set<string>(['perl', 'js', 'html', 'sh']);
 
@@ -95,11 +95,16 @@ export function packageAtLine(packages: FunctionInfo[], line: number): string {
 }
 
 export class TreeNode {
-  functionsLoaded = false;
+  /** File nodes: the in-progress/finished function parse; cleared by invalidateFile() */
+  loading?: Promise<void>;
+  /** File nodes: bumped by invalidateFile(), so a parse that was overtaken doesn't write stale results */
+  loadGen = 0;
   children?: TreeNode[];
   lang?: Lang;
   /** Perl files: `package` statements, loaded together with the functions */
-  packages?: FunctionInfo[];
+  packages?: PackageInfo[];
+  /** File nodes: every function node, flat - `children` may group them under package nodes */
+  functions?: TreeNode[];
 
   constructor(
     public kind: NodeKind,
@@ -132,11 +137,20 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   private definitionIndex?: Map<string, DefEntry[]>;
   /** Perl package name -> where it is declared; rebuilt together with definitionIndex. */
   private packageIndex = new Map<string, { uri: vscode.Uri; line: number }[]>();
+  /** Bumped whenever definitionIndex is dropped, so an index built across a change isn't cached. */
+  private indexGen = 0;
+  /** Bumped by each build(); only the latest build may publish its tree. */
+  private buildGen = 0;
 
   async refresh(): Promise<void> {
-    await this.build();
-    this.definitionIndex = undefined;
+    if (!(await this.build())) return;
+    this.dropDefinitionIndex();
     this._onDidChangeTreeData.fire();
+  }
+
+  private dropDefinitionIndex(): void {
+    this.definitionIndex = undefined;
+    this.indexGen++;
   }
 
   getTreeItem(node: TreeNode): vscode.TreeItem {
@@ -155,6 +169,10 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         : vscode.TreeItemCollapsibleState.None;
       item.contextValue = 'file';
       item.command = { command: 'JChCodeTree.openItem', title: 'Open', arguments: [node] };
+    } else if (node.kind === 'package') {
+      item.iconPath = new vscode.ThemeIcon('symbol-namespace');
+      item.collapsibleState = vscode.TreeItemCollapsibleState.Expanded;
+      item.contextValue = 'package';
     } else {
       item.iconPath = new vscode.ThemeIcon('symbol-method');
       item.contextValue = 'function';
@@ -167,9 +185,10 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     if (!node) return this.roots;
     if (node.kind === 'folder') return node.children ?? [];
     if (node.kind === 'file') {
-      if (!node.functionsLoaded) await this.loadFunctions(node);
+      await this.ensureFunctions(node);
       return node.children ?? [];
     }
+    if (node.kind === 'package') return node.children ?? [];
     return [];
   }
 
@@ -177,20 +196,62 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     return node.parent;
   }
 
+  /**
+   * Parses a file's functions once; concurrent callers (tree, cursor sync, definition index) share
+   * the same parse. If the file is invalidated mid-parse, waits for the fresh parse instead.
+   */
+  private async ensureFunctions(fileNode: TreeNode): Promise<void> {
+    for (;;) {
+      const load = (fileNode.loading ??= this.loadFunctions(fileNode));
+      await load;
+      if (fileNode.loading === load) return;
+    }
+  }
+
   private async loadFunctions(fileNode: TreeNode): Promise<void> {
-    fileNode.functionsLoaded = true;
+    const gen = fileNode.loadGen;
     let infos: FunctionInfo[] = [];
-    fileNode.packages = undefined;
+    let packages: PackageInfo[] | undefined;
     try {
       const text = await this.readText(fileNode.uri);
       infos = parseFunctions(fileNode.lang!, text);
-      if (fileNode.lang === 'perl') fileNode.packages = parsePerlPackages(text);
+      if (fileNode.lang === 'perl') packages = parsePerlPackages(text);
     } catch {
       infos = [];
     }
-    fileNode.children = infos.map(
+    if (gen !== fileNode.loadGen) return;
+    fileNode.packages = packages;
+    fileNode.functions = infos.map(
       info => new TreeNode('function', info.name, fileNode.uri, fileNode, info.line)
     );
+    fileNode.children = this.groupByPackage(fileNode);
+  }
+
+  /**
+   * Functions of a file whose subs span 2+ packages go under one node per package (file order,
+   * subs before the first `package` under `main`); otherwise they stay flat under the file.
+   */
+  private groupByPackage(fileNode: TreeNode): TreeNode[] {
+    const functions = fileNode.functions!;
+    if (!fileNode.packages?.length) return functions;
+    const groups = new Map<string, TreeNode>();
+    for (const fn of functions) {
+      const pkg = packageAtLine(fileNode.packages, fn.line!);
+      let group = groups.get(pkg);
+      if (!group) {
+        const decl = fileNode.packages.find(p => p.declared && p.name === pkg);
+        group = new TreeNode('package', pkg, fileNode.uri, fileNode, decl?.line);
+        group.children = [];
+        groups.set(pkg, group);
+      }
+      group.children!.push(fn);
+      fn.parent = group;
+    }
+    if (groups.size < 2) {
+      for (const fn of functions) fn.parent = fileNode;
+      return functions;
+    }
+    return [...groups.values()];
   }
 
   /** An open editor may hold unsaved edits - read what the user sees, not the disk copy. */
@@ -237,22 +298,25 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   async invalidateFile(uri: vscode.Uri): Promise<void> {
     const node = await this.resolveFileNode(uri.fsPath);
     if (node) {
-      node.functionsLoaded = false;
+      node.loading = undefined;
+      node.loadGen++;
       node.children = undefined;
-      this.definitionIndex = undefined;
+      node.functions = undefined;
+      this.dropDefinitionIndex();
       this._onDidChangeTreeData.fire(node);
     }
   }
 
   private async ensureDefinitionIndex(): Promise<Map<string, DefEntry[]>> {
     if (this.definitionIndex) return this.definitionIndex;
+    const gen = this.indexGen;
     const fileNodes = [...this.fileIndex.values()].filter(n => n.lang !== undefined);
-    await Promise.all(fileNodes.map(n => (n.functionsLoaded ? Promise.resolve() : this.loadFunctions(n))));
+    await Promise.all(fileNodes.map(n => this.ensureFunctions(n)));
 
     const index = new Map<string, DefEntry[]>();
     const packages = new Map<string, { uri: vscode.Uri; line: number }[]>();
     for (const fileNode of fileNodes) {
-      for (const child of fileNode.children ?? []) {
+      for (const child of fileNode.functions ?? []) {
         const line = child.line ?? 0;
         const pkg = fileNode.packages ? packageAtLine(fileNode.packages, line) : undefined;
         const entry = { uri: fileNode.uri, line, lang: fileNode.lang!, pkg };
@@ -261,12 +325,14 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         else index.set(child.label, [entry]);
       }
       for (const p of fileNode.packages ?? []) {
+        if (!p.declared) continue;
         const list = packages.get(p.name);
         if (list) list.push({ uri: fileNode.uri, line: p.line });
         else packages.set(p.name, [{ uri: fileNode.uri, line: p.line }]);
       }
     }
-    this.definitionIndex = index;
+    // Cache only if nothing changed while building; otherwise use it for this call and rebuild next time.
+    if (gen === this.indexGen) this.definitionIndex = index;
     this.packageIndex = packages;
     return index;
   }
@@ -358,10 +424,9 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
   async findFunctionAtLine(fsPath: string, line: number): Promise<TreeNode | undefined> {
     const fileNode = await this.resolveFileNode(fsPath);
     if (!fileNode) return undefined;
-    if (!fileNode.functionsLoaded) await this.loadFunctions(fileNode);
-    const children = fileNode.children ?? [];
+    await this.ensureFunctions(fileNode);
     let best: TreeNode | undefined;
-    for (const child of children) {
+    for (const child of fileNode.functions ?? []) {
       if (child.line !== undefined && child.line <= line) {
         if (!best || (best.line !== undefined && child.line > best.line)) best = child;
       }
@@ -448,8 +513,13 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     }
   }
 
-  private async build(): Promise<void> {
-    this.fileIndex.clear();
+  /**
+   * Builds the tree into fresh roots/index and publishes them only if no newer build started
+   * meanwhile - overlapping refreshes must not mix two trees. Returns false when superseded.
+   */
+  private async build(): Promise<boolean> {
+    const gen = ++this.buildGen;
+    const fileIndex = new Map<string, TreeNode>();
     loadExtensionSetting();
     const folders = vscode.workspace.workspaceFolders ?? [];
     const roots: TreeNode[] = [];
@@ -512,13 +582,16 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
         const fileNode = new TreeNode('file', parts[parts.length - 1], uri, parent);
         fileNode.lang = lang === 'plain' ? undefined : lang;
         parent.children!.push(fileNode);
-        this.fileIndex.set(uri.fsPath, fileNode);
+        fileIndex.set(uri.fsPath, fileNode);
       }
 
       sortFolderChildren(root);
       roots.push(root);
     }
 
+    if (gen !== this.buildGen) return false;
+    this.fileIndex = fileIndex;
     this.roots = roots;
+    return true;
   }
 }

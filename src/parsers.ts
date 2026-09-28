@@ -7,7 +7,10 @@ export interface FunctionInfo {
 /** Matches `sub name {`, `sub name;` (forward decl) is skipped by requiring a brace or end of line body. */
 const PERL_SUB_RE = /^\s*sub\s+([A-Za-z_]\w*(?:::\w+)*)\b/;
 
-const PERL_PACKAGE_RE = /^\s*package\s+([A-Za-z_]\w*(?:::\w+)*)/;
+/** `package Foo::Bar;` / `package Foo::Bar 1.2 {` (group 2 = `;` or `{`), or a lone brace. */
+const PERL_PACKAGE_TOKEN_RE = /\bpackage\s+([A-Za-z_]\w*(?:::\w+)*)(?:\s+v?[\d._]+)?\s*([;{])|[{}]/g;
+/** `<<EOF`, `<<"EOF"`, `<<'EOF'`, `<<~EOF` - the body lines until the terminator are skipped. */
+const PERL_HEREDOC_RE = /<<(~?)(?:"([^"]+)"|'([^']+)'|([A-Za-z_]\w*))/g;
 
 /** Perl source lines with their index, skipping POD blocks (=head1 ... =cut) and stopping at __END__/__DATA__. */
 function perlCodeLines(text: string): [string, number][] {
@@ -38,12 +41,54 @@ export function parsePerlFunctions(text: string): FunctionInfo[] {
   return results;
 }
 
-/** `package Foo::Bar;` (and block form `package Foo::Bar {`) lines, in file order. */
-export function parsePerlPackages(text: string): FunctionInfo[] {
-  const results: FunctionInfo[] = [];
+export interface PackageInfo extends FunctionInfo {
+  /** false for the implicit switch back to the outer package where a package's block closes */
+  declared: boolean;
+}
+
+/** A line with string literals, escaped braces and `#` comments removed, for brace counting. */
+function perlCodeOnly(line: string): string {
+  return line
+    .replace(/\\./g, '')
+    .replace(/"[^"]*"|'[^']*'/g, '')
+    .replace(/(^|[^$])#.*/, '$1');
+}
+
+/**
+ * Package switches in file order. A package lasts until the end of the block it is declared in:
+ * `package Foo { ... }` until its closing brace, `{ package Foo; ... }` until the enclosing `}`,
+ * a file-level `package Foo;` until the next one. Where a scope ends, a `declared: false` entry
+ * switches back to the outer package (`main` at file level). Braces are counted approximately:
+ * strings, comments and heredoc bodies are skipped, regexes are not.
+ */
+export function parsePerlPackages(text: string): PackageInfo[] {
+  const results: PackageInfo[] = [];
+  const scopes: { name: string; depth: number }[] = [];   // active package scopes, innermost last
+  const current = () => scopes[scopes.length - 1]?.name ?? 'main';
+  let depth = 0;
+  let heredocEnd: { tag: string; indented: boolean }[] = [];
   for (const [line, i] of perlCodeLines(text)) {
-    const m = PERL_PACKAGE_RE.exec(line);
-    if (m) results.push({ name: m[1], line: i });
+    if (heredocEnd.length) {
+      const { tag, indented } = heredocEnd[0];
+      if ((indented ? line.trim() : line) === tag) heredocEnd.shift();
+      continue;
+    }
+    const code = perlCodeOnly(line);
+    for (const m of code.matchAll(PERL_PACKAGE_TOKEN_RE)) {
+      if (m[1]) {
+        results.push({ name: m[1], line: i, declared: true });
+        if (m[2] === '{') depth++;
+        scopes.push({ name: m[1], depth });
+      } else if (m[0] === '{') {
+        depth++;
+      } else {
+        depth = Math.max(0, depth - 1);
+        const before = current();
+        while (scopes.length && depth < scopes[scopes.length - 1].depth) scopes.pop();
+        if (current() !== before) results.push({ name: current(), line: i, declared: false });
+      }
+    }
+    heredocEnd = [...line.matchAll(PERL_HEREDOC_RE)].map(h => ({ tag: h[2] ?? h[3] ?? h[4], indented: h[1] === '~' }));
   }
   return results;
 }
@@ -61,7 +106,8 @@ const JS_PATTERNS: RegExp[] = [
   // const foo = (...) => ...   /  const foo = (x: string): number => ...
   /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::\s*[^=>{]+)?=>/,
   // class method / object method shorthand: name(...) {  /  private async name(...): Type {
-  /^\s*(?:public\s+|private\s+|protected\s+|readonly\s+)*(?:static\s+)?(?:async\s+)?(?:\*\s*)?([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*(?::\s*[^{]+)?\{/,
+  // A `function` inside the parens means a call taking a callback (`$(function() {`, `setTimeout(function () {`).
+  /^\s*(?:public\s+|private\s+|protected\s+|readonly\s+)*(?:static\s+)?(?:async\s+)?(?:\*\s*)?([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\((?![^)]*\bfunction\b)[^)]*\)\s*(?::\s*[^{]+)?\{/,
 ];
 
 export function parseJsFunctions(text: string): FunctionInfo[] {
