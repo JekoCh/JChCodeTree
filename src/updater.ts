@@ -9,7 +9,8 @@ const RAW_BASE = 'https://raw.githubusercontent.com/JekoCh/JChCodeTree/HEAD/';
 
 function download(url: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const req = https.get(url, res => {
+    // The timeout option replaces the global agent's 5s socket timeout, which a slow DNS lookup alone can exceed.
+    const req = https.get(url, { timeout: 30000 }, res => {
       if (res.statusCode !== 200) {
         res.resume();
         reject(new Error(`HTTP ${res.statusCode} for ${url}`));
