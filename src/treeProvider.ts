@@ -182,7 +182,8 @@ export class CodeTreeProvider implements vscode.TreeDataProvider<TreeNode> {
     const item = new vscode.TreeItem(node.label);
     if (node.kind === 'folder') {
       item.resourceUri = node.uri;
-      item.iconPath = vscode.ThemeIcon.Folder;
+      // A codicon, not ThemeIcon.Folder: file icon themes like Seti have no folder icons, leaving folders bare.
+      item.iconPath = new vscode.ThemeIcon('folder');
       item.collapsibleState = vscode.TreeItemCollapsibleState.Collapsed;
       item.contextValue = 'folder';
     } else if (node.kind === 'file') {
